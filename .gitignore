@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+
+# Environments
+.venv/
+venv/
+
+# Local outputs
+runs/
+results/
+data/cache/
+data/*.npz
+data/*.npy
+
+# OS
+.DS_Store

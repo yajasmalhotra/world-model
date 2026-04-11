@@ -1,0 +1,55 @@
+project:
+  name: world_model_project_smoke
+  seed: 7
+  device: auto
+  output_root: runs
+
+data:
+  manifest_dir: data/manifests
+  image_size: 64
+  seq_len: 16
+  obs_len: 6
+  max_objects: 4
+  min_objects: 2
+  max_occluders: 2
+  min_occluders: 1
+  velocity_scale: 0.03
+  object_size_min: 0.06
+  object_size_max: 0.11
+  train_count: 32
+  val_count: 8
+  test_count: 8
+  num_workers: 0
+  batch_size: 4
+
+model:
+  state_dim: 10
+  dynamic_dim: 4
+  hidden_dim: 96
+  interaction_dim: 48
+  encoder_cnn_dim: 64
+  encoder_rnn_dim: 96
+  max_objects: 4
+  max_occluders: 2
+
+train:
+  lr: 0.001
+  weight_decay: 0.0
+  epochs_dynamics: 1
+  epochs_encoder: 1
+  epochs_joint: 1
+  epochs_pixel_baseline: 1
+  grad_clip: 1.0
+  log_every: 10
+  checkpoint_metric: val_rollout_rmse
+
+eval:
+  rollout_horizon: 10
+  batch_size: 4
+  slices:
+    - test
+    - test_long_occlusion
+
+demo:
+  default_seed: 2026
+  default_horizon: 10

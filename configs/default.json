@@ -1,0 +1,61 @@
+{
+  "project": {
+    "name": "world_model_project",
+    "seed": 42,
+    "device": "auto",
+    "output_root": "runs"
+  },
+  "data": {
+    "manifest_dir": "data/manifests",
+    "image_size": 64,
+    "seq_len": 20,
+    "obs_len": 8,
+    "max_objects": 4,
+    "min_objects": 2,
+    "max_occluders": 2,
+    "min_occluders": 1,
+    "velocity_scale": 0.035,
+    "object_size_min": 0.06,
+    "object_size_max": 0.11,
+    "train_count": 600,
+    "val_count": 120,
+    "test_count": 120,
+    "num_workers": 0,
+    "batch_size": 32
+  },
+  "model": {
+    "state_dim": 10,
+    "dynamic_dim": 4,
+    "hidden_dim": 128,
+    "interaction_dim": 64,
+    "encoder_cnn_dim": 96,
+    "encoder_rnn_dim": 128,
+    "max_objects": 4,
+    "max_occluders": 2
+  },
+  "train": {
+    "lr": 0.001,
+    "weight_decay": 0.0,
+    "epochs_dynamics": 25,
+    "epochs_encoder": 20,
+    "epochs_joint": 20,
+    "epochs_pixel_baseline": 15,
+    "grad_clip": 1.0,
+    "log_every": 20,
+    "checkpoint_metric": "val_rollout_rmse"
+  },
+  "eval": {
+    "rollout_horizon": 12,
+    "batch_size": 32,
+    "slices": [
+      "test",
+      "test_long_occlusion",
+      "test_unseen_speed",
+      "test_unseen_occluders"
+    ]
+  },
+  "demo": {
+    "default_seed": 2026,
+    "default_horizon": 12
+  }
+}

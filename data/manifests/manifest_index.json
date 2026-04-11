@@ -1,0 +1,60 @@
+{
+  "train": {
+    "path": "data/manifests/train.jsonl",
+    "count": 600,
+    "tags": [
+      "train"
+    ],
+    "overrides": {}
+  },
+  "val": {
+    "path": "data/manifests/val.jsonl",
+    "count": 120,
+    "tags": [
+      "val"
+    ],
+    "overrides": {}
+  },
+  "test": {
+    "path": "data/manifests/test.jsonl",
+    "count": 120,
+    "tags": [
+      "test"
+    ],
+    "overrides": {}
+  },
+  "test_long_occlusion": {
+    "path": "data/manifests/test_long_occlusion.jsonl",
+    "count": 120,
+    "tags": [
+      "test",
+      "long_occlusion"
+    ],
+    "overrides": {
+      "seq_len": 28,
+      "obs_len": 8
+    }
+  },
+  "test_unseen_speed": {
+    "path": "data/manifests/test_unseen_speed.jsonl",
+    "count": 120,
+    "tags": [
+      "test",
+      "unseen_speed"
+    ],
+    "overrides": {
+      "velocity_scale": 0.05600000000000001
+    }
+  },
+  "test_unseen_occluders": {
+    "path": "data/manifests/test_unseen_occluders.jsonl",
+    "count": 120,
+    "tags": [
+      "test",
+      "unseen_occluders"
+    ],
+    "overrides": {
+      "occluder_layout": "edge_bias"
+    }
+  }
+}

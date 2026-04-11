@@ -1,0 +1,12 @@
+torch>=2.2
+numpy>=1.24
+pandas>=2.0
+matplotlib>=3.8
+Pillow>=10.0
+imageio>=2.34
+PyYAML>=6.0
+tqdm>=4.66
+scikit-learn>=1.4
+tensorboard>=2.16
+streamlit>=1.33
+protobuf>=3.20.3,<4
