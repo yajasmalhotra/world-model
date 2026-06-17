@@ -1,3 +1,11 @@
+---
+license: mit
+datasets:
+- yajasm/world-model
+papers:
+- https://doi.org/10.5281/zenodo.20725115
+---
+
 # World Model Project
 
 This project implements a CPU-feasible object-centric world model for synthetic visual scenes with occlusion, plus:
@@ -7,6 +15,22 @@ This project implements a CPU-feasible object-centric world model for synthetic 
 - direct pixel baseline
 - evaluation and result aggregation pipeline
 - Streamlit demo with counterfactual rollouts
+
+## Datasets
+
+This repository includes the lightweight manifest datasets used by the project under `data/manifests/`. The full image/state sequences are regenerated deterministically from manifest seeds, so the repo stays small while preserving reproducibility.
+
+Included splits:
+
+- `train.jsonl`: in-distribution training scenes
+- `val.jsonl`: validation scenes
+- `test.jsonl`: in-distribution test scenes
+- `test_long_occlusion.jsonl`: longer rollouts with extended occlusion
+- `test_unseen_speed.jsonl`: higher-speed generalization scenes
+- `test_unseen_occluders.jsonl`: shifted occluder-layout generalization scenes
+- `manifest_index.json`: split metadata and counts
+
+The corresponding Hugging Face dataset is `yajasm/world-model`, listed in the metadata block above. Generated caches remain local under `data/cache/` and are intentionally ignored.
 
 ## Setup
 
