@@ -119,6 +119,14 @@ python scripts/train_belief3d.py --config configs/belief3d_mvp.yaml
 python scripts/evaluate_belief3d.py --config configs/belief3d_mvp.yaml --mode all
 ```
 
+For the larger local stress-test scene setting (`128x128`, 40 frames, up to 10 objects, 512 particles/object):
+
+```bash
+python scripts/build_manifests3d.py --config configs/belief3d_large.yaml
+python scripts/train_belief3d.py --config configs/belief3d_large.yaml
+python scripts/evaluate_belief3d.py --config configs/belief3d_large.yaml --mode all
+```
+
 This path is additive and does not modify the original 2D training pipeline.
 
 ## Storage Hygiene

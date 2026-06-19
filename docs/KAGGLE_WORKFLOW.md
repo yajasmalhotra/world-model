@@ -28,6 +28,7 @@ Use three tiers once the 3D path exists:
 - `belief3d_smoke.yaml`: tiny run for shape checks and CPU fallback.
 - `belief3d_small.yaml`: quick Kaggle GPU run for iteration.
 - `belief3d.yaml`: main experiment with multiple seeds and evaluation splits.
+- `belief3d_large.yaml`: local stress-test target with 128px frames, 40 steps, up to 10 objects, and 512 particles/object.
 
 Current smoke commands:
 
