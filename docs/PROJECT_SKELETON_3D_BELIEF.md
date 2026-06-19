@@ -72,10 +72,11 @@ This skeleton should be introduced incrementally. Do not rename or remove the ex
 - Objects: 2-5 spheres/cubes with colors and radii.
 - Motion: constant velocity with wall bounces.
 - Occluders: axis-aligned boxes between camera and objects.
-- Cameras: start with one fixed camera; add 2-3 views later.
+- Cameras: start with one fixed perspective camera; add 2-3 views later.
 - Sequence length: 16-32.
-- Resolution: 64x64 for smoke/main, 96x96 only for nicer demo renders.
+- Resolution: 64x64 for smoke/main, with a local 128x128 stress-test config for nicer 3D renders.
 - State: `[x, y, z, vx, vy, vz, visible, occluded, size, shape_id, color_id, object_id]`.
+- Observations: RGB camera frames plus normalized depth maps. The raster resolution is 2D, but the scene state, projection, occlusion, and belief target are 3D.
 
 ### Belief Representation
 
@@ -96,7 +97,8 @@ Particle belief is easiest to debug and naturally supports physics constraints.
 
 ### Rendering
 
-- Render observed RGB frames with simple camera projection.
+- Render observed RGB frames with a CGAI-inspired perspective camera: projection, depth buffering, shaded spheres/cubes, and projected occluder faces.
+- Emit per-frame depth maps so later models can compare RGB-only, depth-only, and RGB-D belief inference.
 - Render belief by projecting particles/Gaussians into the camera as translucent splats.
 - For 3D demo views, use matplotlib/plotly/three.js-style point clouds first.
 - Avoid training a full 3DGS/NeRF renderer in v1.
@@ -153,6 +155,8 @@ Approximate first-pass compute target:
 - Compute NLL/mass/distance/calibration.
 
 Initial implementation status: `scripts/build_manifests3d.py`, `scripts/evaluate_belief3d.py`, `src/data3d/`, `src/models/belief_state.py`, and `src/eval/belief_metrics.py` provide the first smoke-testable version of this baseline.
+
+Renderer status: `src/data3d/scene_generator3d.py` now generates perspective RGB frames and normalized depth maps from the same 3D state. `src/data3d/dataset3d.py` exposes those as `obs_frames`, `future_frames`, `obs_depth`, and `future_depth`.
 
 ### Milestone 2b: Supervised Image-to-Belief Encoder
 

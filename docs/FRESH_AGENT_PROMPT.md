@@ -49,10 +49,14 @@ Target 3D setup:
 - 2-5 simple objects: spheres, cubes, capsules, maybe low-poly meshes later
 - occluders: boxes/planes, eventually SDF geometry
 - state: `[x, y, z, vx, vy, vz, visible, occluded, size, shape_id, color_id, object_id]`
-- observations: one or more low-res camera views, e.g. 64x64 or 96x96
+- observations: one or more low-res camera views, e.g. 64x64, 96x96, or the current 128x128 local stress-test setting
+- current renderer: fixed perspective camera with depth buffering, simple Lambert/specular shading for spheres, shaded cube/occluder faces, and normalized depth maps exposed as `obs_depth` / `future_depth`
 - belief: particles, Gaussian mixtures, or sparse splats over `(x, y, z)`
 - renderer: simple projection renderer first; optional PyTorch3D, nvdiffrast, or Three.js later
 - compute target: Kaggle/Colab friendly, generated from seeds, no giant cached datasets
+
+Important clarification:
+`128x128` is only the 2D camera raster. The generated world is still 3D because each object has true `(x, y, z)` position, `(vx, vy, vz)` velocity, 3D occlusion against box geometry, perspective projection, depth ordering, and hidden-trajectory metrics in 3D.
 
 Core metrics:
 - Negative log likelihood of the true hidden 3D location under belief: `-log B_t(x_true, y_true, z_true)`

@@ -52,6 +52,12 @@ class Scene3DConfig:
     world_min: float = -1.0
     world_max: float = 1.0
     occluder_layout: str = "center_bias"
+    camera_z: float = 3.2
+    focal_length: float = 2.0
+    ambient_light: float = 0.28
+    light_dir_x: float = -0.35
+    light_dir_y: float = 0.45
+    light_dir_z: float = 0.82
 
 
 def _clamp(v: float, lo: float, hi: float) -> float:
@@ -64,14 +70,23 @@ def _normalize_id(idx: int, max_count: int) -> float:
     return idx / float(max_count - 1)
 
 
-def _to_px(x: float, y: float, cfg: Scene3DConfig) -> tuple[float, float]:
-    lo = cfg.world_min
-    span = cfg.world_max - cfg.world_min
-    u = (x - lo) / span
-    v = (y - lo) / span
-    px = u * (cfg.image_size - 1)
-    py = (1.0 - v) * (cfg.image_size - 1)
-    return float(px), float(py)
+def _project_point(x: float, y: float, z: float, cfg: Scene3DConfig) -> tuple[float, float, float, float]:
+    depth = max(cfg.camera_z - z, 1e-4)
+    scale = cfg.focal_length / depth
+    center = (cfg.image_size - 1) * 0.5
+    px = center + x * scale * center
+    py = center - y * scale * center
+    return float(px), float(py), float(depth), float(scale)
+
+
+def _light_vector(cfg: Scene3DConfig) -> np.ndarray:
+    light = np.array([cfg.light_dir_x, cfg.light_dir_y, cfg.light_dir_z], dtype=np.float32)
+    return light / max(float(np.linalg.norm(light)), 1e-6)
+
+
+def _shade_color(color: tuple[int, int, int], shade: float) -> np.ndarray:
+    rgb = np.asarray(color, dtype=np.float32)
+    return np.clip(rgb * shade, 0.0, 255.0)
 
 
 def _box_contains_xy(point: np.ndarray, box: np.ndarray) -> bool:
@@ -82,17 +97,17 @@ def _box_contains_xy(point: np.ndarray, box: np.ndarray) -> bool:
 
 def point_occluded(point: np.ndarray, occluders: np.ndarray) -> bool:
     """
-    Orthographic camera convention: camera looks along -z, so larger z is closer.
-    A point is occluded when its projected x/y lies inside an occluder whose front
-    slab is closer to the camera than the point.
+    Camera convention: camera is at positive z and looks along -z, so larger z
+    is closer. A point is occluded when its x/y lies inside an occluder whose
+    front slab is closer to the camera than the point.
     """
     for occ in occluders:
         if not np.any(occ):
             continue
         if not _box_contains_xy(point, occ):
             continue
-        occ_z0 = float(min(occ[2], occ[5]))
-        if occ_z0 > float(point[2]):
+        occ_front_z = float(max(occ[2], occ[5]))
+        if occ_front_z > float(point[2]):
             return True
     return False
 
@@ -185,55 +200,222 @@ class SyntheticScene3DGenerator:
         updated[STATE_INDEX_3D["vx"] : STATE_INDEX_3D["vz"] + 1] = vel
         return updated
 
-    def _draw_object(self, draw: ImageDraw.ImageDraw, state: np.ndarray, cfg: Scene3DConfig) -> None:
+    def _background(self, cfg: Scene3DConfig) -> np.ndarray:
+        height = cfg.image_size
+        top = np.array([238, 243, 247], dtype=np.float32)
+        bottom = np.array(BACKGROUND_COLOR_3D, dtype=np.float32)
+        ramp = np.linspace(0.0, 1.0, height, dtype=np.float32)[:, None, None]
+        image = top[None, None, :] * (1.0 - ramp) + bottom[None, None, :] * ramp
+        return np.repeat(image, cfg.image_size, axis=1).astype(np.float32)
+
+    def _normalise_depth(self, zbuffer: np.ndarray, cfg: Scene3DConfig, far_depth: float) -> np.ndarray:
+        near_depth = max(cfg.camera_z - cfg.world_max - cfg.object_size_max, 1e-4)
+        scene_far_depth = cfg.camera_z - cfg.world_min + cfg.object_size_max
+        depth = np.ones_like(zbuffer, dtype=np.float32)
+        valid = zbuffer < far_depth
+        if np.any(valid):
+            depth[valid] = np.clip(
+                (zbuffer[valid] - near_depth) / max(scene_far_depth - near_depth, 1e-6),
+                0.0,
+                1.0,
+            )
+        return depth
+
+    def _draw_projected_polygon(
+        self,
+        image: np.ndarray,
+        zbuffer: np.ndarray,
+        points: list[tuple[float, float]],
+        depth: float,
+        color: np.ndarray,
+        outline: Optional[np.ndarray] = None,
+    ) -> None:
+        if len(points) < 3:
+            return
+        mask_img = Image.new("L", (self.config.image_size, self.config.image_size), 0)
+        mask_draw = ImageDraw.Draw(mask_img)
+        mask_draw.polygon(points, fill=255)
+        mask = np.asarray(mask_img) > 0
+        visible = mask & (depth < zbuffer)
+        if np.any(visible):
+            image[visible] = color
+            zbuffer[visible] = depth
+
+        if outline is None:
+            return
+        line_img = Image.new("L", (self.config.image_size, self.config.image_size), 0)
+        line_draw = ImageDraw.Draw(line_img)
+        line_draw.line(points + [points[0]], fill=255, width=1)
+        line_mask = np.asarray(line_img) > 0
+        line_visible = line_mask & (depth <= zbuffer + 1e-3)
+        if np.any(line_visible):
+            image[line_visible] = outline
+            zbuffer[line_visible] = np.minimum(zbuffer[line_visible], depth)
+
+    def _project_face(
+        self, corners: list[tuple[float, float, float]], cfg: Scene3DConfig
+    ) -> tuple[list[tuple[float, float]], float]:
+        projected: list[tuple[float, float]] = []
+        depths: list[float] = []
+        for x, y, z in corners:
+            px, py, depth, _scale = _project_point(x, y, z, cfg)
+            projected.append((px, py))
+            depths.append(depth)
+        return projected, float(np.mean(depths))
+
+    def _draw_sphere(
+        self,
+        image: np.ndarray,
+        zbuffer: np.ndarray,
+        state: np.ndarray,
+        cfg: Scene3DConfig,
+        color: tuple[int, int, int],
+    ) -> None:
         x = float(state[STATE_INDEX_3D["x"]])
         y = float(state[STATE_INDEX_3D["y"]])
         z = float(state[STATE_INDEX_3D["z"]])
         size = float(state[STATE_INDEX_3D["size"]])
+        cx, cy, center_depth, scale = _project_point(x, y, z, cfg)
+        radius = max(2.0, size * scale * cfg.image_size)
+        x0 = max(0, int(np.floor(cx - radius - 1)))
+        y0 = max(0, int(np.floor(cy - radius - 1)))
+        x1 = min(cfg.image_size - 1, int(np.ceil(cx + radius + 1)))
+        y1 = min(cfg.image_size - 1, int(np.ceil(cy + radius + 1)))
+        if x0 > x1 or y0 > y1:
+            return
+
+        yy, xx = np.mgrid[y0 : y1 + 1, x0 : x1 + 1]
+        dx = (xx.astype(np.float32) - cx) / radius
+        dy = (yy.astype(np.float32) - cy) / radius
+        r2 = dx * dx + dy * dy
+        mask = r2 <= 1.0
+        if not np.any(mask):
+            return
+
+        nz = np.sqrt(np.clip(1.0 - r2, 0.0, 1.0))
+        normals = np.stack([dx, -dy, nz], axis=-1)
+        light = _light_vector(cfg)
+        lambert = np.clip(np.sum(normals * light[None, None, :], axis=-1), 0.0, 1.0)
+        shade = cfg.ambient_light + (1.0 - cfg.ambient_light) * lambert
+        specular = np.power(np.clip(lambert, 0.0, 1.0), 24.0) * 42.0
+        base = np.asarray(color, dtype=np.float32)
+        shaded = np.clip(base[None, None, :] * shade[..., None] + specular[..., None], 0.0, 255.0)
+        pixel_depth = center_depth - size * nz
+
+        local_z = zbuffer[y0 : y1 + 1, x0 : x1 + 1]
+        local_img = image[y0 : y1 + 1, x0 : x1 + 1]
+        visible = mask & (pixel_depth < local_z)
+        if np.any(visible):
+            local_img[visible] = shaded[visible]
+            local_z[visible] = pixel_depth[visible]
+
+    def _draw_cube(
+        self,
+        image: np.ndarray,
+        zbuffer: np.ndarray,
+        state: np.ndarray,
+        cfg: Scene3DConfig,
+        color: tuple[int, int, int],
+    ) -> None:
+        x = float(state[STATE_INDEX_3D["x"]])
+        y = float(state[STATE_INDEX_3D["y"]])
+        z = float(state[STATE_INDEX_3D["z"]])
+        size = float(state[STATE_INDEX_3D["size"]])
+        x0, x1 = x - size, x + size
+        y0, y1 = y - size, y + size
+        z0, z1 = z - size, z + size
+        front = [(x0, y0, z1), (x1, y0, z1), (x1, y1, z1), (x0, y1, z1)]
+        side_x = (
+            [(x0, y0, z0), (x0, y1, z0), (x0, y1, z1), (x0, y0, z1)]
+            if x >= 0.0
+            else [(x1, y0, z0), (x1, y1, z0), (x1, y1, z1), (x1, y0, z1)]
+        )
+        side_y = (
+            [(x0, y0, z0), (x1, y0, z0), (x1, y0, z1), (x0, y0, z1)]
+            if y >= 0.0
+            else [(x0, y1, z0), (x1, y1, z0), (x1, y1, z1), (x0, y1, z1)]
+        )
+
+        outline = _shade_color(color, 0.38)
+        for corners, shade in ((side_x, 0.62), (side_y, 0.76), (front, 1.0)):
+            poly, depth = self._project_face(corners, cfg)
+            self._draw_projected_polygon(
+                image=image,
+                zbuffer=zbuffer,
+                points=poly,
+                depth=depth,
+                color=_shade_color(color, shade),
+                outline=outline,
+            )
+
+    def _draw_object(
+        self,
+        image: np.ndarray,
+        zbuffer: np.ndarray,
+        state: np.ndarray,
+        cfg: Scene3DConfig,
+    ) -> None:
         shape_norm = float(state[STATE_INDEX_3D["shape_id"]])
         color_norm = float(state[STATE_INDEX_3D["color_id"]])
         shape_id = int(round(shape_norm * (len(SHAPES_3D) - 1)))
         color_id = int(round(color_norm * (len(COLORS_3D) - 1)))
         color = COLORS_3D[color_id % len(COLORS_3D)]
-        cx, cy = _to_px(x, y, cfg)
-        depth_scale = 0.75 + 0.35 * ((z - cfg.world_min) / (cfg.world_max - cfg.world_min))
-        radius = max(2.0, size * cfg.image_size * 0.5 * depth_scale)
-        left, top, right, bottom = cx - radius, cy - radius, cx + radius, cy + radius
         if SHAPES_3D[shape_id % len(SHAPES_3D)] == "cube":
-            draw.rectangle([left, top, right, bottom], fill=color)
+            self._draw_cube(image, zbuffer, state, cfg, color)
         else:
-            draw.ellipse([left, top, right, bottom], fill=color)
+            self._draw_sphere(image, zbuffer, state, cfg, color)
 
-    def _draw_occluder(self, draw: ImageDraw.ImageDraw, occ: np.ndarray, cfg: Scene3DConfig) -> None:
-        x0, y0, _z0, x1, y1, _z1 = occ.tolist()
-        px0, py1 = _to_px(x0, y0, cfg)
-        px1, py0 = _to_px(x1, y1, cfg)
-        draw.rectangle([px0, py0, px1, py1], fill=OCCLUDER_COLOR_3D)
+    def _draw_occluder(
+        self,
+        image: np.ndarray,
+        zbuffer: np.ndarray,
+        occ: np.ndarray,
+        cfg: Scene3DConfig,
+    ) -> None:
+        x0, y0, z0, x1, y1, z1 = occ.tolist()
+        front_z = max(float(z0), float(z1))
+        corners = [(x0, y0, front_z), (x1, y0, front_z), (x1, y1, front_z), (x0, y1, front_z)]
+        poly, depth = self._project_face(corners, cfg)
+        z_factor = (front_z - cfg.world_min) / max(cfg.world_max - cfg.world_min, 1e-6)
+        shade = 0.76 + 0.14 * z_factor
+        color = _shade_color(OCCLUDER_COLOR_3D, shade)
+        outline = _shade_color(OCCLUDER_COLOR_3D, 0.45)
+        self._draw_projected_polygon(image, zbuffer, poly, depth, color, outline=outline)
 
-    def render_state(self, state_t: np.ndarray, object_mask_t: np.ndarray, occluders: np.ndarray) -> np.ndarray:
+    def render_state_with_depth(
+        self, state_t: np.ndarray, object_mask_t: np.ndarray, occluders: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray]:
         cfg = self.config
-        image = Image.new("RGB", (cfg.image_size, cfg.image_size), BACKGROUND_COLOR_3D)
-        draw = ImageDraw.Draw(image)
-        drawables: list[tuple[float, str, int]] = []
+        image = self._background(cfg)
+        far_depth = cfg.camera_z - cfg.world_min + cfg.object_size_max + 1.0
+        zbuffer = np.full((cfg.image_size, cfg.image_size), far_depth, dtype=np.float32)
         for o in range(cfg.max_objects):
             if object_mask_t[o] >= 0.5:
-                drawables.append((float(state_t[o, STATE_INDEX_3D["z"]]), "object", o))
-        for k, occ in enumerate(occluders):
+                self._draw_object(image, zbuffer, state_t[o], cfg)
+        for occ in occluders:
             if np.any(occ):
-                drawables.append((float((occ[2] + occ[5]) * 0.5), "occluder", k))
-        # Draw from far to near because camera is at positive z.
-        for _depth, kind, idx in sorted(drawables, key=lambda item: item[0]):
-            if kind == "object":
-                self._draw_object(draw, state_t[idx], cfg)
-            else:
-                self._draw_occluder(draw, occluders[idx], cfg)
-        return np.asarray(image, dtype=np.uint8)
+                self._draw_occluder(image, zbuffer, occ, cfg)
+        depth = self._normalise_depth(zbuffer, cfg, far_depth)
+        return np.clip(image, 0.0, 255.0).astype(np.uint8), depth
+
+    def render_state(self, state_t: np.ndarray, object_mask_t: np.ndarray, occluders: np.ndarray) -> np.ndarray:
+        image, _depth = self.render_state_with_depth(state_t, object_mask_t, occluders)
+        return image
 
     def render_sequence(self, states: np.ndarray, object_mask: np.ndarray, occluders: np.ndarray) -> np.ndarray:
         frames = np.zeros((states.shape[0], self.config.image_size, self.config.image_size, 3), dtype=np.uint8)
         for t in range(states.shape[0]):
             frames[t] = self.render_state(states[t], object_mask[t], occluders)
         return frames
+
+    def render_sequence_with_depth(
+        self, states: np.ndarray, object_mask: np.ndarray, occluders: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray]:
+        frames = np.zeros((states.shape[0], self.config.image_size, self.config.image_size, 3), dtype=np.uint8)
+        depth = np.zeros((states.shape[0], self.config.image_size, self.config.image_size), dtype=np.float32)
+        for t in range(states.shape[0]):
+            frames[t], depth[t] = self.render_state_with_depth(states[t], object_mask[t], occluders)
+        return frames, depth
 
     def generate(
         self,
@@ -268,9 +450,10 @@ class SyntheticScene3DGenerator:
                 states[t] = state_t
                 object_mask[t] = object_mask_t
 
-            frames = self.render_sequence(states, object_mask, occluders)
+            frames, depth = self.render_sequence_with_depth(states, object_mask, occluders)
             return {
                 "frames": frames,
+                "depth": depth,
                 "state": states,
                 "object_mask": object_mask,
                 "occluders": occluders.astype(np.float32),

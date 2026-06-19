@@ -26,6 +26,12 @@ SCENE3D_CONFIG_KEYS = {
     "world_min",
     "world_max",
     "occluder_layout",
+    "camera_z",
+    "focal_length",
+    "ambient_light",
+    "light_dir_x",
+    "light_dir_y",
+    "light_dir_z",
 }
 
 
@@ -54,12 +60,15 @@ class SyntheticScene3DDataset(Dataset):
             tags=row.get("tags", []),
         )
         frames = sample["frames"].astype(np.float32) / 255.0
+        depth = sample["depth"].astype(np.float32)
         state = sample["state"].astype(np.float32)
         object_mask = sample["object_mask"].astype(np.float32)
         occluders = sample["occluders"].astype(np.float32)
 
         obs_frames = frames[: self.obs_len]
         future_frames = frames[self.obs_len :]
+        obs_depth = depth[: self.obs_len]
+        future_depth = depth[self.obs_len :]
         obs_state = state[: self.obs_len]
         future_state = state[self.obs_len :]
         obs_mask = object_mask[: self.obs_len]
@@ -71,6 +80,8 @@ class SyntheticScene3DDataset(Dataset):
             "tags": row.get("tags", []),
             "obs_frames": torch.from_numpy(obs_frames).permute(0, 3, 1, 2).contiguous(),
             "future_frames": torch.from_numpy(future_frames).permute(0, 3, 1, 2).contiguous(),
+            "obs_depth": torch.from_numpy(obs_depth).unsqueeze(1).contiguous(),
+            "future_depth": torch.from_numpy(future_depth).unsqueeze(1).contiguous(),
             "obs_state": torch.from_numpy(obs_state),
             "future_state": torch.from_numpy(future_state),
             "obs_mask": torch.from_numpy(obs_mask),
@@ -84,6 +95,8 @@ def collate_scenes3d(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
     tensor_keys = {
         "obs_frames",
         "future_frames",
+        "obs_depth",
+        "future_depth",
         "obs_state",
         "future_state",
         "obs_mask",

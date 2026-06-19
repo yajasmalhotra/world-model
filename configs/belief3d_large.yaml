@@ -23,6 +23,12 @@ data3d:
   world_min: -1.0
   world_max: 1.0
   occluder_layout: center_bias
+  camera_z: 3.2
+  focal_length: 2.0
+  ambient_light: 0.28
+  light_dir_x: -0.35
+  light_dir_y: 0.45
+  light_dir_z: 0.82
 
 belief:
   num_particles: 512

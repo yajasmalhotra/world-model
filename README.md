@@ -26,6 +26,8 @@ The next research direction is documented in:
 
 The short version: evolve the existing 2D object-centric world model into a 3D hidden-trajectory calibration benchmark. The model maintains a belief distribution over hidden object locations during occlusion, and the benchmark scores whether that belief stays correlated and calibrated with the true hidden 3D trajectory.
 
+The 3D path now renders low-resolution camera observations from true 3D scene state: `128x128` means the camera image size, while object positions, velocities, occluders, visibility, and belief metrics live in `(x, y, z)`. The renderer uses a fixed perspective camera, depth buffering, simple shaded spheres/cubes, projected occluder faces, and per-frame normalized depth maps inspired by the projection, lighting, and visibility concepts from CGAI.
+
 ## Datasets
 
 This repository includes the lightweight manifest datasets used by the project under `data/manifests/`. The full image/state sequences are regenerated deterministically from manifest seeds, so the repo stays small while preserving reproducibility.
@@ -128,6 +130,8 @@ python scripts/evaluate_belief3d.py --config configs/belief3d_large.yaml --mode 
 ```
 
 This path is additive and does not modify the original 2D training pipeline.
+
+3D batches also expose `obs_depth` and `future_depth` tensors for future RGB-D or depth-supervised experiments. Current training scripts continue to use RGB `obs_frames`, so the extra depth channel is available without changing the existing MVP training loop.
 
 ## Storage Hygiene
 

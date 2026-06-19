@@ -4,7 +4,7 @@ This project direction is designed to be trainable on free Kaggle or Colab GPU s
 
 ## Target Constraints
 
-- Keep generated observations at 64x64 for most experiments.
+- Keep generated observations at 64x64 for most experiments; use `belief3d_large.yaml` only when the 128x128 perspective renderer is needed for local stress tests or nicer demo assets.
 - Generate scenes from seed manifests instead of storing large datasets.
 - Keep individual training jobs short enough to survive notebook limits.
 - Save checkpoints, metrics, and plots every epoch.
