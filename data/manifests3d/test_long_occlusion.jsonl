@@ -1,0 +1,8 @@
+{"scene_id": "test_long_occlusion_000000", "seed": 13000000, "tags": ["test", "long_occlusion"], "overrides": {"seq_len": 32, "obs_len": 6}}
+{"scene_id": "test_long_occlusion_000001", "seed": 13000001, "tags": ["test", "long_occlusion"], "overrides": {"seq_len": 32, "obs_len": 6}}
+{"scene_id": "test_long_occlusion_000002", "seed": 13000002, "tags": ["test", "long_occlusion"], "overrides": {"seq_len": 32, "obs_len": 6}}
+{"scene_id": "test_long_occlusion_000003", "seed": 13000003, "tags": ["test", "long_occlusion"], "overrides": {"seq_len": 32, "obs_len": 6}}
+{"scene_id": "test_long_occlusion_000004", "seed": 13000004, "tags": ["test", "long_occlusion"], "overrides": {"seq_len": 32, "obs_len": 6}}
+{"scene_id": "test_long_occlusion_000005", "seed": 13000005, "tags": ["test", "long_occlusion"], "overrides": {"seq_len": 32, "obs_len": 6}}
+{"scene_id": "test_long_occlusion_000006", "seed": 13000006, "tags": ["test", "long_occlusion"], "overrides": {"seq_len": 32, "obs_len": 6}}
+{"scene_id": "test_long_occlusion_000007", "seed": 13000007, "tags": ["test", "long_occlusion"], "overrides": {"seq_len": 32, "obs_len": 6}}

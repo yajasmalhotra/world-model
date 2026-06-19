@@ -1,0 +1,60 @@
+{
+  "train": {
+    "path": "data/manifests3d/train.jsonl",
+    "count": 32,
+    "tags": [
+      "train"
+    ],
+    "overrides": {}
+  },
+  "val": {
+    "path": "data/manifests3d/val.jsonl",
+    "count": 8,
+    "tags": [
+      "val"
+    ],
+    "overrides": {}
+  },
+  "test": {
+    "path": "data/manifests3d/test.jsonl",
+    "count": 8,
+    "tags": [
+      "test"
+    ],
+    "overrides": {}
+  },
+  "test_long_occlusion": {
+    "path": "data/manifests3d/test_long_occlusion.jsonl",
+    "count": 8,
+    "tags": [
+      "test",
+      "long_occlusion"
+    ],
+    "overrides": {
+      "seq_len": 32,
+      "obs_len": 6
+    }
+  },
+  "test_unseen_speed": {
+    "path": "data/manifests3d/test_unseen_speed.jsonl",
+    "count": 8,
+    "tags": [
+      "test",
+      "unseen_speed"
+    ],
+    "overrides": {
+      "velocity_scale": 0.08800000000000001
+    }
+  },
+  "test_unseen_occluders": {
+    "path": "data/manifests3d/test_unseen_occluders.jsonl",
+    "count": 8,
+    "tags": [
+      "test",
+      "unseen_occluders"
+    ],
+    "overrides": {
+      "occluder_layout": "edge_bias"
+    }
+  }
+}

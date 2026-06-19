@@ -118,6 +118,11 @@ def main() -> None:
         joint_ckpt = st.text_input("Joint checkpoint", value=default_joint or "")
         dynamics_ckpt = st.text_input("Dynamics checkpoint", value=default_dynamics or "")
         encoder_ckpt = st.text_input("Encoder checkpoint", value=default_encoder or "")
+        inference_mode = st.selectbox(
+            "Demo mode",
+            options=["state_first", "pixel_path"],
+            format_func=lambda x: "State-first" if x == "state_first" else "Pixel path",
+        )
         seed = st.number_input("Scene seed", min_value=0, max_value=10_000_000, value=2026, step=1)
         counterfactual_object = st.slider("Counterfactual object idx", min_value=0, max_value=3, value=0, step=1)
         dvx = st.slider("Delta vx", min_value=-0.1, max_value=0.1, value=0.04, step=0.005)
@@ -136,7 +141,6 @@ def main() -> None:
         return
 
     if not run_button:
-        st.info("Set options in the sidebar and click 'Run Demo'.")
         return
 
     scene_cfg = to_scene_config(config["data"])
@@ -152,8 +156,11 @@ def main() -> None:
     occluders = torch.from_numpy(sample["occluders"]).unsqueeze(0).to(device)
 
     with torch.no_grad():
-        init_state = encoder(obs_frames)
-        init_state[..., 6:] = obs_state[:, -1, :, 6:]
+        if inference_mode == "state_first":
+            init_state = obs_state[:, -1].clone()
+        else:
+            init_state = encoder(obs_frames)
+            init_state[..., 6:] = obs_state[:, -1, :, 6:]
         pred_state = dynamics(init_state, object_mask, occluders, horizon=horizon)
         cf_init = apply_counterfactual(
             init_state,
@@ -197,4 +204,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

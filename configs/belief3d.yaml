@@ -1,0 +1,62 @@
+project:
+  name: hidden_trajectory_calibration
+  seed: 42
+  device: auto
+  output_root: runs
+
+data3d:
+  manifest_dir: data/manifests3d
+  image_size: 64
+  seq_len: 24
+  obs_len: 8
+  max_objects: 5
+  min_objects: 2
+  max_occluders: 3
+  min_occluders: 1
+  velocity_scale: 0.045
+  object_size_min: 0.07
+  object_size_max: 0.15
+  train_count: 1000
+  val_count: 160
+  test_count: 160
+  world_min: -1.0
+  world_max: 1.0
+  occluder_layout: center_bias
+
+belief:
+  num_particles: 256
+  init_pos_noise: 0.02
+  init_vel_noise: 0.008
+  process_pos_noise: 0.003
+  process_vel_noise: 0.002
+  density_sigma: 0.07
+  mass_radius: 0.12
+  credible_levels:
+    - 0.5
+    - 0.7
+    - 0.9
+
+model3d:
+  state_dim: 12
+  belief_dim: 6
+  encoder_cnn_dim: 96
+  encoder_rnn_dim: 128
+  max_objects: 5
+  velocity_limit: 0.16
+  min_log_std: -5.0
+  max_log_std: -1.0
+
+train_belief3d:
+  lr: 0.001
+  weight_decay: 0.0
+  epochs: 10
+  grad_clip: 1.0
+  log_every: 20
+
+eval:
+  batch_size: 16
+  slices:
+    - test
+    - test_long_occlusion
+    - test_unseen_speed
+    - test_unseen_occluders

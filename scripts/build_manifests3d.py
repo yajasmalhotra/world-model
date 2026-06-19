@@ -1,0 +1,95 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from src.data.manifest import ManifestSpec, build_manifest_rows, write_manifest
+
+
+def load_config(path: str) -> dict:
+    config_path = Path(path)
+    if config_path.suffix.lower() == ".json":
+        with config_path.open("r", encoding="utf-8") as f:
+            return json.load(f)
+    import yaml  # type: ignore
+
+    with config_path.open("r", encoding="utf-8") as f:
+        return yaml.safe_load(f)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Build deterministic 3D hidden-trajectory manifests.")
+    parser.add_argument("--config", type=str, default="configs/belief3d.yaml")
+    parser.add_argument("--output-dir", type=str, default=None)
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    cfg = load_config(args.config)
+    data_cfg = cfg["data3d"]
+    output_dir = Path(args.output_dir or data_cfg["manifest_dir"])
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    train_count = int(data_cfg["train_count"])
+    val_count = int(data_cfg["val_count"])
+    test_count = int(data_cfg["test_count"])
+    seq_len = int(data_cfg["seq_len"])
+    obs_len = int(data_cfg["obs_len"])
+    velocity_scale = float(data_cfg["velocity_scale"])
+
+    specs = [
+        ManifestSpec("train", 10_000_000, train_count, tags=["train"], overrides={}),
+        ManifestSpec("val", 11_000_000, val_count, tags=["val"], overrides={}),
+        ManifestSpec("test", 12_000_000, test_count, tags=["test"], overrides={}),
+        ManifestSpec(
+            "test_long_occlusion",
+            13_000_000,
+            test_count,
+            tags=["test", "long_occlusion"],
+            overrides={"seq_len": max(seq_len + 8, 32), "obs_len": obs_len},
+        ),
+        ManifestSpec(
+            "test_unseen_speed",
+            14_000_000,
+            test_count,
+            tags=["test", "unseen_speed"],
+            overrides={"velocity_scale": velocity_scale * 1.6},
+        ),
+        ManifestSpec(
+            "test_unseen_occluders",
+            15_000_000,
+            test_count,
+            tags=["test", "unseen_occluders"],
+            overrides={"occluder_layout": "edge_bias"},
+        ),
+    ]
+
+    index = {}
+    for spec in specs:
+        rows = build_manifest_rows(spec)
+        path = output_dir / f"{spec.name}.jsonl"
+        write_manifest(path, rows)
+        index[spec.name] = {
+            "path": str(path),
+            "count": len(rows),
+            "tags": spec.tags,
+            "overrides": spec.overrides or {},
+        }
+        print(f"Wrote {len(rows):4d} rows -> {path}")
+
+    index_path = output_dir / "manifest_index.json"
+    with index_path.open("w", encoding="utf-8") as f:
+        json.dump(index, f, indent=2)
+    print(f"Wrote index -> {index_path}")
+
+
+if __name__ == "__main__":
+    main()
