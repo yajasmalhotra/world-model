@@ -111,6 +111,14 @@ python scripts/train_belief3d.py --config configs/belief3d_smoke.yaml
 python scripts/evaluate_belief3d.py --config configs/belief3d_smoke.yaml --mode all
 ```
 
+For a more meaningful local MVP run:
+
+```bash
+python scripts/build_manifests3d.py --config configs/belief3d_mvp.yaml
+python scripts/train_belief3d.py --config configs/belief3d_mvp.yaml
+python scripts/evaluate_belief3d.py --config configs/belief3d_mvp.yaml --mode all
+```
+
 This path is additive and does not modify the original 2D training pipeline.
 
 ## Storage Hygiene
