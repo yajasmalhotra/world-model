@@ -185,6 +185,8 @@ Initial implementation status: `src/models/belief_encoder3d.py` and `scripts/tra
 - README figures.
 - Short methodology/results report.
 
+Initial implementation status: `scripts/export_belief3d_demo_assets.py` exports GIF/PNG/JSON demo assets showing RGB observations, depth maps, camera-projected belief particles, true 3D trajectory, expected distance, mass near truth, and surprise.
+
 ## Design Principle
 
 Do not chase photorealism or scale. The project wins by making hidden beliefs measurable, visual, and physically interpretable.

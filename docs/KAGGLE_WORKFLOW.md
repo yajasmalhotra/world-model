@@ -21,6 +21,12 @@ This project direction is designed to be trainable on free Kaggle or Colab GPU s
 7. Evaluate belief metrics on validation/test splits.
 8. Export plots, GIFs, and checkpoint artifacts.
 
+Demo export command:
+
+```bash
+python scripts/export_belief3d_demo_assets.py --config configs/belief3d_smoke.yaml --seeds 2026
+```
+
 ## Config Tiers
 
 Use three tiers once the 3D path exists:

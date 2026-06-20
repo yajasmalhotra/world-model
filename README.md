@@ -129,6 +129,12 @@ python scripts/train_belief3d.py --config configs/belief3d_large.yaml
 python scripts/evaluate_belief3d.py --config configs/belief3d_large.yaml --mode all
 ```
 
+Export a visual 3D belief demo with RGB frames, depth, projected particles, the true hidden trajectory, and per-frame belief metrics:
+
+```bash
+python scripts/export_belief3d_demo_assets.py --config configs/belief3d_smoke.yaml --seeds 2026
+```
+
 This path is additive and does not modify the original 2D training pipeline.
 
 3D batches also expose `obs_depth` and `future_depth` tensors for future RGB-D or depth-supervised experiments. Current training scripts continue to use RGB `obs_frames`, so the extra depth channel is available without changing the existing MVP training loop.
