@@ -59,6 +59,7 @@ class Scene3DConfig:
     light_dir_y: float = 0.45
     light_dir_z: float = 0.82
     scenario: str = "random"
+    path_mode: str = "linear"
     target_min_hidden: int = 5
     target_max_hidden: int = 14
     target_min_visible_tail: int = 5
@@ -99,6 +100,22 @@ def _box_contains_xy(point: np.ndarray, box: np.ndarray) -> bool:
     x, y = point[:2].tolist()
     x0, y0, _z0, x1, y1, _z1 = box.tolist()
     return x0 <= x <= x1 and y0 <= y <= y1
+
+
+def _nonzero_boxes(boxes: np.ndarray) -> list[np.ndarray]:
+    return [box for box in boxes if np.any(box)]
+
+
+def merge_boxes(*box_groups: np.ndarray, max_count: int) -> np.ndarray:
+    merged = np.zeros((max_count, 6), dtype=np.float32)
+    cursor = 0
+    for group in box_groups:
+        for box in _nonzero_boxes(group):
+            if cursor >= max_count:
+                return merged
+            merged[cursor] = box.astype(np.float32)
+            cursor += 1
+    return merged
 
 
 def point_occluded(point: np.ndarray, occluders: np.ndarray) -> bool:
@@ -269,6 +286,84 @@ class SyntheticScene3DGenerator:
         positions = pos0[None, :] + velocity[None, :] * times
         positions = np.clip(positions, lo, hi).astype(np.float32)
         return positions, pos0, velocity
+
+    def _target_path_plan(
+        self,
+        rng: np.random.Generator,
+        cfg: Scene3DConfig,
+        hidden_start: int,
+        hidden_end: int,
+        size: float,
+        path_mode: str,
+    ) -> tuple[np.ndarray, np.ndarray, Dict[str, Any], np.ndarray]:
+        positions, _pos0, base_velocity = self._target_path(rng, cfg, hidden_start, hidden_end, size)
+        velocities = np.repeat(base_velocity.reshape(1, 3), cfg.seq_len, axis=0).astype(np.float32)
+        physical_obstacles = np.zeros((cfg.max_occluders, 6), dtype=np.float32)
+        metadata: Dict[str, Any] = {
+            "path_mode": path_mode,
+            "collision_or_turn_frames": [],
+            "valid_route_id": None,
+        }
+        if path_mode == "linear":
+            return positions, velocities, metadata, physical_obstacles
+
+        margin = size + 0.08
+        lo = cfg.world_min + margin
+        hi = cfg.world_max - margin
+        turn_frame = int((hidden_start + hidden_end) // 2)
+        turn_frame = max(hidden_start + 1, min(hidden_end, turn_frame))
+
+        if path_mode == "curved":
+            direction = base_velocity[:2]
+            norm = max(float(np.linalg.norm(direction)), 1e-6)
+            perp = np.array([-direction[1] / norm, direction[0] / norm], dtype=np.float32)
+            phase = np.linspace(0.0, np.pi, cfg.seq_len, dtype=np.float32)
+            amplitude = float(rng.uniform(0.16, 0.26))
+            curve = np.sin(phase)[:, None] * perp[None, :] * amplitude
+            curve[:hidden_start] *= np.linspace(0.0, 1.0, hidden_start, dtype=np.float32)[:, None]
+            curve[hidden_end + 1 :] *= np.linspace(1.0, 0.0, cfg.seq_len - hidden_end - 1, dtype=np.float32)[:, None]
+            positions[:, 0:2] = np.clip(positions[:, 0:2] + curve, lo, hi)
+            metadata["collision_or_turn_frames"] = [turn_frame]
+            metadata["valid_route_id"] = "curved_hidden_arc"
+        else:
+            axis = 0 if abs(float(base_velocity[0])) >= abs(float(base_velocity[1])) else 1
+            reflected = base_velocity.copy()
+            reflected[axis] *= -1.0
+            pre_velocity = base_velocity.copy()
+            turn_pos = positions[turn_frame].copy()
+            for t in range(cfg.seq_len):
+                if t <= turn_frame:
+                    positions[t] = positions[0] + pre_velocity * float(t)
+                    velocities[t] = pre_velocity
+                else:
+                    positions[t] = turn_pos + reflected * float(t - turn_frame)
+                    velocities[t] = reflected
+            positions = np.clip(positions, lo, hi).astype(np.float32)
+            half = np.array([0.08, 0.28, 0.32], dtype=np.float32)
+            half[axis] = 0.045
+            obstacle_center = turn_pos.copy()
+            obstacle_center[axis] += np.sign(float(pre_velocity[axis]) or 1.0) * float(size * 0.7)
+            box0 = np.maximum(obstacle_center - half, cfg.world_min + 0.04)
+            box1 = np.minimum(obstacle_center + half, cfg.world_max - 0.04)
+            physical_obstacles[0] = np.concatenate([box0, box1]).astype(np.float32)
+            metadata["collision_or_turn_frames"] = [turn_frame]
+            metadata["valid_route_id"] = f"bounce_axis_{axis}"
+
+        if path_mode == "impossible_jump":
+            jump_frame = hidden_end + 1
+            side = -1.0 if float(positions[jump_frame - 1, 0]) > 0.0 else 1.0
+            impossible_pos = positions[jump_frame - 1].copy()
+            impossible_pos[0] = side * float(rng.uniform(0.62, 0.84))
+            impossible_pos[1] = float(rng.uniform(-0.74, 0.74))
+            impossible_pos[2] = float(rng.uniform(-0.56, 0.12))
+            positions[jump_frame:] = impossible_pos[None, :]
+            velocities[jump_frame:] = 0.0
+            metadata["collision_or_turn_frames"] = [jump_frame]
+            metadata["valid_route_id"] = "teleport_reappearance"
+
+        velocities[1:] = positions[1:] - positions[:-1]
+        velocities[0] = velocities[1] if cfg.seq_len > 1 else base_velocity
+        return positions.astype(np.float32), velocities.astype(np.float32), metadata, physical_obstacles
 
     def _target_occluders(
         self,
@@ -561,12 +656,18 @@ class SyntheticScene3DGenerator:
         self,
         states: np.ndarray,
         target_idx: int,
+        scenario: str,
+        path_mode: str,
         hidden_start: int,
         hidden_end: int,
         reappearance_frame: int,
         target_positions: np.ndarray,
-        target_velocity: np.ndarray,
+        target_velocities: np.ndarray,
         target_occluder_indices: list[int],
+        obstacle_indices: list[int],
+        collision_or_turn_frames: list[int],
+        valid_route_id: Optional[str],
+        is_impossible_event: bool,
     ) -> Dict[str, Any]:
         occluded = states[:, target_idx, STATE_INDEX_3D["occluded"]] > 0.5
         hidden_frames = np.flatnonzero(occluded).astype(int).tolist()
@@ -579,7 +680,10 @@ class SyntheticScene3DGenerator:
                     actual_reappearance = int(t)
                     break
         return {
+            "target_object_index": int(target_idx),
             "object_index": int(target_idx),
+            "scenario": scenario,
+            "path_mode": path_mode,
             "planned_occlusion_start": int(hidden_start),
             "planned_occlusion_end": int(hidden_end),
             "planned_reappearance_frame": int(reappearance_frame),
@@ -591,14 +695,25 @@ class SyntheticScene3DGenerator:
             "visible_after": int(np.sum(~occluded[min(reappearance_frame, states.shape[0]) :])),
             "path_start": target_positions[0].astype(float).tolist(),
             "path_end": target_positions[-1].astype(float).tolist(),
-            "velocity": target_velocity.astype(float).tolist(),
+            "velocity": target_velocities[min(hidden_start, target_velocities.shape[0] - 1)].astype(float).tolist(),
+            "trajectory_velocities": target_velocities.astype(float).tolist(),
+            "occluder_ids": [int(idx) for idx in target_occluder_indices],
             "occluder_indices": [int(idx) for idx in target_occluder_indices],
+            "obstacle_ids": [int(idx) for idx in obstacle_indices],
+            "collision_or_turn_frames": [int(idx) for idx in collision_or_turn_frames],
+            "valid_route_id": valid_route_id,
+            "is_impossible_event": bool(is_impossible_event),
             "num_target_occluders": int(len(target_occluder_indices)),
         }
 
-    def _generate_random_states(self, rng: np.random.Generator, cfg: Scene3DConfig) -> tuple[np.ndarray, np.ndarray, np.ndarray, Dict[str, Any]]:
+    def _generate_random_states(
+        self, rng: np.random.Generator, cfg: Scene3DConfig
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, Dict[str, Any]]:
         num_objects = int(rng.integers(cfg.min_objects, cfg.max_objects + 1))
-        occluders = self._sample_occluders(rng, cfg)
+        visual_occluders = self._sample_occluders(rng, cfg)
+        physical_obstacles = np.zeros((cfg.max_occluders, 6), dtype=np.float32)
+        solid_screens = np.zeros((cfg.max_occluders, 6), dtype=np.float32)
+        occluders = merge_boxes(visual_occluders, solid_screens, max_count=cfg.max_occluders)
         state_t = np.zeros((cfg.max_objects, STATE_DIM_3D), dtype=np.float32)
         object_mask_t = np.zeros((cfg.max_objects,), dtype=np.float32)
         for i in range(num_objects):
@@ -614,7 +729,7 @@ class SyntheticScene3DGenerator:
             states[t] = state_t
             object_mask[t] = object_mask_t
         self._apply_visibility(states, object_mask, occluders, cfg)
-        return states, object_mask, occluders, {"num_objects": int(num_objects)}
+        return states, object_mask, visual_occluders, physical_obstacles, solid_screens, {"num_objects": int(num_objects)}
 
     def _target_episode_is_valid(self, target: Dict[str, Any], cfg: Scene3DConfig) -> bool:
         start = target.get("occlusion_start")
@@ -630,15 +745,27 @@ class SyntheticScene3DGenerator:
             return False
         return True
 
+    def _path_mode_for_scenario(self, cfg: Scene3DConfig, rng: np.random.Generator) -> str:
+        if cfg.path_mode != "linear":
+            return cfg.path_mode
+        if cfg.scenario == "test_structured_occlusion" or cfg.scenario == "structured_occlusion":
+            return str(rng.choice(["bounce", "curved"]))
+        if cfg.scenario == "test_impossible_reappearance" or cfg.scenario == "impossible_reappearance":
+            return "impossible_jump"
+        return "linear"
+
     def _generate_targeted_occlusion_attempt(
         self, rng: np.random.Generator, cfg: Scene3DConfig
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, Dict[str, Any]]:
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, Dict[str, Any]]:
         num_objects = int(rng.integers(max(1, cfg.min_objects), cfg.max_objects + 1))
         target_idx = 0
         target_size = float(rng.uniform(cfg.object_size_min, cfg.object_size_max))
         hidden_start, hidden_end, reappearance_frame = self._target_hidden_window(rng, cfg)
-        target_positions, _pos0, target_velocity = self._target_path(rng, cfg, hidden_start, hidden_end, target_size)
-        occluders, target_occluder_indices = self._target_occluders(
+        path_mode = self._path_mode_for_scenario(cfg, rng)
+        target_positions, target_velocities, path_meta, physical_obstacles = self._target_path_plan(
+            rng, cfg, hidden_start, hidden_end, target_size, path_mode
+        )
+        visual_occluders, target_occluder_indices = self._target_occluders(
             rng,
             cfg,
             target_positions=target_positions,
@@ -646,6 +773,13 @@ class SyntheticScene3DGenerator:
             hidden_start=hidden_start,
             hidden_end=hidden_end,
         )
+        solid_screens = np.zeros((cfg.max_occluders, 6), dtype=np.float32)
+        if path_mode == "impossible_jump" and cfg.max_occluders > 1:
+            # A solid screen gives the impossible split one object that is both
+            # camera-occluding and motion-blocking, while the reappearance jump
+            # remains physically implausible by construction.
+            solid_screens[0] = visual_occluders[0]
+        occluders = merge_boxes(visual_occluders, solid_screens, max_count=cfg.max_occluders)
 
         state_t = np.zeros((cfg.max_objects, STATE_DIM_3D), dtype=np.float32)
         object_mask_t = np.zeros((cfg.max_objects,), dtype=np.float32)
@@ -653,7 +787,7 @@ class SyntheticScene3DGenerator:
         target_color = int(rng.integers(0, len(COLORS_3D)))
         state_t[target_idx] = self._make_object_state(
             target_positions[0],
-            target_velocity,
+            target_velocities[0],
             target_size,
             target_shape,
             target_color,
@@ -672,31 +806,45 @@ class SyntheticScene3DGenerator:
                 for i in range(1, num_objects):
                     state_t[i] = self._advance_one_step(state_t[i], cfg)
             state_t[target_idx, STATE_INDEX_3D["x"] : STATE_INDEX_3D["z"] + 1] = target_positions[t]
-            state_t[target_idx, STATE_INDEX_3D["vx"] : STATE_INDEX_3D["vz"] + 1] = target_velocity
+            state_t[target_idx, STATE_INDEX_3D["vx"] : STATE_INDEX_3D["vz"] + 1] = target_velocities[t]
             states[t] = state_t
             object_mask[t] = object_mask_t
         self._apply_visibility(states, object_mask, occluders, cfg)
+        obstacle_indices = [idx for idx, box in enumerate(physical_obstacles) if np.any(box)]
         target_meta = self._target_metadata(
             states=states,
             target_idx=target_idx,
+            scenario=cfg.scenario,
+            path_mode=path_mode,
             hidden_start=hidden_start,
             hidden_end=hidden_end,
             reappearance_frame=reappearance_frame,
             target_positions=target_positions,
-            target_velocity=target_velocity,
+            target_velocities=target_velocities,
             target_occluder_indices=target_occluder_indices,
+            obstacle_indices=obstacle_indices,
+            collision_or_turn_frames=path_meta.get("collision_or_turn_frames", []),
+            valid_route_id=path_meta.get("valid_route_id"),
+            is_impossible_event=path_mode == "impossible_jump",
         )
-        return states, object_mask, occluders, {"num_objects": int(num_objects), "target": target_meta}
+        return (
+            states,
+            object_mask,
+            visual_occluders,
+            physical_obstacles,
+            solid_screens,
+            {"num_objects": int(num_objects), "target": target_meta},
+        )
 
     def _generate_targeted_occlusion_states(
         self, rng: np.random.Generator, cfg: Scene3DConfig
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, Dict[str, Any]]:
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, Dict[str, Any]]:
         last_result = self._generate_targeted_occlusion_attempt(rng, cfg)
-        if self._target_episode_is_valid(last_result[3]["target"], cfg):
+        if self._target_episode_is_valid(last_result[5]["target"], cfg):
             return last_result
         for _ in range(63):
             candidate = self._generate_targeted_occlusion_attempt(rng, cfg)
-            if self._target_episode_is_valid(candidate[3]["target"], cfg):
+            if self._target_episode_is_valid(candidate[5]["target"], cfg):
                 return candidate
             last_result = candidate
         return last_result
@@ -712,11 +860,27 @@ class SyntheticScene3DGenerator:
         self.config = cfg
         try:
             rng = np.random.default_rng(seed)
-            if cfg.scenario == "targeted_occlusion":
-                states, object_mask, occluders, scenario_metadata = self._generate_targeted_occlusion_states(rng, cfg)
+            if cfg.scenario in {"targeted_occlusion", "structured_occlusion", "impossible_reappearance"}:
+                (
+                    states,
+                    object_mask,
+                    visual_occluders,
+                    physical_obstacles,
+                    solid_screens,
+                    scenario_metadata,
+                ) = self._generate_targeted_occlusion_states(rng, cfg)
             else:
-                states, object_mask, occluders, scenario_metadata = self._generate_random_states(rng, cfg)
+                (
+                    states,
+                    object_mask,
+                    visual_occluders,
+                    physical_obstacles,
+                    solid_screens,
+                    scenario_metadata,
+                ) = self._generate_random_states(rng, cfg)
 
+            occluders = merge_boxes(visual_occluders, solid_screens, max_count=cfg.max_occluders)
+            obstacles = merge_boxes(physical_obstacles, solid_screens, max_count=cfg.max_occluders)
             frames, depth = self.render_sequence_with_depth(states, object_mask, occluders)
             return {
                 "frames": frames,
@@ -724,11 +888,20 @@ class SyntheticScene3DGenerator:
                 "state": states,
                 "object_mask": object_mask,
                 "occluders": occluders.astype(np.float32),
+                "visual_occluders": visual_occluders.astype(np.float32),
+                "physical_obstacles": physical_obstacles.astype(np.float32),
+                "solid_screens": solid_screens.astype(np.float32),
+                "obstacles": obstacles.astype(np.float32),
                 "metadata": {
                     "seed": int(seed),
                     "scenario": cfg.scenario,
                     "num_objects": int(scenario_metadata["num_objects"]),
                     "tags": tags or [],
+                    "geometry": {
+                        "visual_occluders": [idx for idx, box in enumerate(visual_occluders) if np.any(box)],
+                        "physical_obstacles": [idx for idx, box in enumerate(physical_obstacles) if np.any(box)],
+                        "solid_screens": [idx for idx, box in enumerate(solid_screens) if np.any(box)],
+                    },
                     "config": asdict(cfg),
                     **{k: v for k, v in scenario_metadata.items() if k != "num_objects"},
                 },

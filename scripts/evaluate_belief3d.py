@@ -16,7 +16,14 @@ if str(ROOT) not in sys.path:
 from src.data3d.dataset3d import SyntheticScene3DDataset, collate_scenes3d
 from src.eval.belief_metrics import particle_belief_metrics, summarize_metric_rows
 from src.models.belief_encoder3d import ImageToBeliefEncoder3D
-from src.models.belief_state import ParticleBeliefConfig, rollout_particle_belief, rollout_particle_belief_from_gaussian
+from src.models.belief_jepa3d import BeliefJEPA3D
+from src.models.belief_state import (
+    ParticleBeliefConfig,
+    particles_from_gaussian_sequence,
+    rollout_geometry_aware_particle_belief,
+    rollout_particle_belief,
+    rollout_particle_belief_from_gaussian,
+)
 from src.train.utils import append_metrics, get_device, init_run_dir, load_checkpoint, load_config, save_summary, set_seed
 
 
@@ -24,8 +31,14 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Evaluate 3D hidden-trajectory belief calibration.")
     parser.add_argument("--config", type=str, default="configs/belief3d.yaml")
     parser.add_argument("--split", type=str, default=None, help="Optional single split override.")
-    parser.add_argument("--mode", type=str, default="physics", choices=["physics", "image", "all"])
+    parser.add_argument(
+        "--mode",
+        type=str,
+        default="constant",
+        choices=["constant", "geometry", "image", "jepa", "all"],
+    )
     parser.add_argument("--encoder-ckpt", type=str, default=None)
+    parser.add_argument("--jepa-ckpt", type=str, default=None)
     return parser.parse_args()
 
 
@@ -60,6 +73,37 @@ def load_image_encoder(config: Dict, device: torch.device, ckpt_path: Optional[s
     return model
 
 
+def load_belief_jepa(config: Dict, device: torch.device, ckpt_path: str) -> tuple[BeliefJEPA3D, bool]:
+    ckpt = load_checkpoint(ckpt_path, device)
+    ckpt_config = ckpt.get("config", config)
+    model_cfg = ckpt_config["model3d"]
+    data_cfg = ckpt_config["data3d"]
+    rgbd = bool(ckpt.get("rgbd", False))
+    horizon = max(int(data_cfg["seq_len"]), int(data_cfg["obs_len"]) + 14, 24) - int(data_cfg["obs_len"])
+    model = BeliefJEPA3D(
+        max_objects=int(model_cfg["max_objects"]),
+        horizon=horizon,
+        input_channels=4 if rgbd else 3,
+        cnn_dim=int(model_cfg["encoder_cnn_dim"]),
+        rnn_dim=int(model_cfg["encoder_rnn_dim"]),
+        latent_dim=int(model_cfg.get("jepa_latent_dim", 64)),
+        world_min=float(data_cfg["world_min"]),
+        world_max=float(data_cfg["world_max"]),
+        velocity_limit=float(model_cfg["velocity_limit"]),
+        min_log_std=float(model_cfg["min_log_std"]),
+        max_log_std=float(model_cfg.get("jepa_max_log_std", -0.8)),
+    ).to(device)
+    model.load_state_dict(ckpt["model_state"], strict=False)
+    return model, rgbd
+
+
+def context_frames(batch: Dict, device: torch.device, rgbd: bool) -> torch.Tensor:
+    frames = batch["obs_frames"].to(device)
+    if not rgbd:
+        return frames
+    return torch.cat([frames, batch["obs_depth"].to(device)], dim=2)
+
+
 def target_object_mask(batch: Dict, future_mask: torch.Tensor) -> Optional[torch.Tensor]:
     metadata = batch.get("metadata")
     if not metadata:
@@ -84,6 +128,8 @@ def evaluate_split(
     device: torch.device,
     mode: str,
     encoder: Optional[ImageToBeliefEncoder3D] = None,
+    jepa: Optional[BeliefJEPA3D] = None,
+    jepa_rgbd: bool = False,
 ) -> Dict[str, float]:
     data_cfg = config["data3d"]
     belief_cfg = config["belief"]
@@ -91,6 +137,8 @@ def evaluate_split(
     rows: list[Dict[str, float]] = []
     if encoder is not None:
         encoder.eval()
+    if jepa is not None:
+        jepa.eval()
 
     for batch in loader:
         obs_frames = batch["obs_frames"].to(device)
@@ -110,6 +158,27 @@ def evaluate_split(
                 outputs["log_std"],
                 init_state,
                 object_mask,
+                horizon=horizon,
+                cfg=particle_cfg,
+            )
+        elif mode == "jepa":
+            if jepa is None:
+                raise RuntimeError("JEPA mode requires a Belief-JEPA checkpoint.")
+            outputs = jepa(context_frames(batch, device, jepa_rgbd))
+            steps = min(outputs["mean"].shape[1], horizon)
+            particles, weights = particles_from_gaussian_sequence(
+                outputs["mean"][:, :steps],
+                outputs["log_std"][:, :steps],
+                object_mask,
+                cfg=particle_cfg,
+            )
+            future_state = future_state[:, :steps]
+            future_mask = future_mask[:, :steps]
+        elif mode == "geometry":
+            particles, weights = rollout_geometry_aware_particle_belief(
+                init_state,
+                object_mask,
+                batch["obstacles"].to(device),
                 horizon=horizon,
                 cfg=particle_cfg,
             )
@@ -147,6 +216,8 @@ def main() -> None:
     device = get_device(config["project"].get("device", "auto"))
     if args.mode in ("image", "all") and args.encoder_ckpt is None:
         args.encoder_ckpt = latest_checkpoint("*_train_belief3d_encoder/checkpoints/best.pt")
+    if args.mode in ("jepa", "all") and args.jepa_ckpt is None:
+        args.jepa_ckpt = latest_checkpoint("*_train_belief_jepa3d*/checkpoints/best.pt")
     manifest_dir = Path(config["data3d"]["manifest_dir"])
     splits = [args.split] if args.split else list(config["eval"]["slices"])
     batch_size = int(config["eval"].get("batch_size", 8))
@@ -156,6 +227,7 @@ def main() -> None:
         "run_type": "evaluate_belief3d",
         "device": str(device),
         "encoder_checkpoint": args.encoder_ckpt,
+        "jepa_checkpoint": args.jepa_ckpt,
         "splits": {},
     }
     image_encoder = (
@@ -163,6 +235,10 @@ def main() -> None:
         if args.mode in ("image", "all") and args.encoder_ckpt is not None
         else None
     )
+    belief_jepa: Optional[BeliefJEPA3D] = None
+    jepa_rgbd = False
+    if args.mode in ("jepa", "all") and args.jepa_ckpt is not None:
+        belief_jepa, jepa_rgbd = load_belief_jepa(config, device, args.jepa_ckpt)
 
     for split in splits:
         manifest_path = manifest_dir / f"{split}.jsonl"
@@ -170,11 +246,17 @@ def main() -> None:
             print(f"Skipping missing split manifest: {manifest_path}")
             continue
         loader = make_loader(manifest_path, config["data3d"], batch_size=batch_size)
-        if args.mode in ("physics", "all"):
-            metrics = evaluate_split(loader, config, device, mode="physics")
-            row = {"split": split, "mode": "physics_particle_belief", **metrics}
+        if args.mode in ("constant", "all"):
+            metrics = evaluate_split(loader, config, device, mode="constant")
+            row = {"split": split, "mode": "constant_velocity_particle_belief", **metrics}
             append_metrics(run_dir, row)
-            summary["splits"][f"physics::{split}"] = metrics
+            summary["splits"][f"constant::{split}"] = metrics
+            print(row)
+        if args.mode in ("geometry", "all"):
+            metrics = evaluate_split(loader, config, device, mode="geometry")
+            row = {"split": split, "mode": "geometry_aware_particle_belief", **metrics}
+            append_metrics(run_dir, row)
+            summary["splits"][f"geometry::{split}"] = metrics
             print(row)
         if args.mode in ("image", "all"):
             if image_encoder is None:
@@ -184,6 +266,15 @@ def main() -> None:
                 row = {"split": split, "mode": "image_to_belief", **metrics}
                 append_metrics(run_dir, row)
                 summary["splits"][f"image::{split}"] = metrics
+                print(row)
+        if args.mode in ("jepa", "all"):
+            if belief_jepa is None:
+                print("Skipping Belief-JEPA mode because no checkpoint was found.")
+            else:
+                metrics = evaluate_split(loader, config, device, mode="jepa", jepa=belief_jepa, jepa_rgbd=jepa_rgbd)
+                row = {"split": split, "mode": "belief_jepa_latent_predictor", **metrics}
+                append_metrics(run_dir, row)
+                summary["splits"][f"jepa::{split}"] = metrics
                 print(row)
 
     save_summary(run_dir, summary)

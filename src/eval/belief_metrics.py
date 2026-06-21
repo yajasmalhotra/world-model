@@ -43,9 +43,13 @@ def particle_belief_metrics(
     if hidden_mask.sum() <= 0:
         return {
             "hidden_nll": float("nan"),
+            "hidden_surprise": float("nan"),
             "hidden_mass_radius": float("nan"),
             "hidden_expected_distance": float("nan"),
             "hidden_mean_error": float("nan"),
+            "hidden_entropy": float("nan"),
+            "reappearance_surprise": float("nan"),
+            "occlusion_duration_degradation": float("nan"),
             "hidden_count": 0.0,
         }
 
@@ -59,16 +63,36 @@ def particle_belief_metrics(
     density = norm_const * torch.sum(weights * torch.exp(-0.5 * (dist / sigma) ** 2), dim=-1)
     nll = -torch.log(density.clamp_min(1e-12))
     mass = torch.sum(weights * (dist <= float(mass_radius)).float(), dim=-1)
+    surprise = -torch.log(mass.clamp_min(1e-8))
     expected_distance = torch.sum(weights * dist, dim=-1)
     belief_mean = torch.sum(weights.unsqueeze(-1) * pos_particles, dim=-2)
     mean_error = torch.sqrt(torch.sum((belief_mean - true_pos) ** 2, dim=-1).clamp_min(1e-12))
+    entropy = -torch.sum(weights * torch.log(weights.clamp_min(1e-8)), dim=-1)
 
     active = hidden_mask > 0.5
+    reappeared = torch.zeros_like(hidden_mask, dtype=torch.bool)
+    if hidden_mask.shape[1] > 1:
+        reappeared[:, 1:] = (hidden_mask[:, :-1] > 0.5) & (hidden_mask[:, 1:] <= 0.5) & (object_mask[:, 1:] > 0.5)
+    hidden_steps = torch.cumsum(active.float(), dim=1)
+    first_hidden = active & (hidden_steps <= 1.0)
+    total_hidden = active.float().sum(dim=1, keepdim=True)
+    last_hidden = active & (hidden_steps >= total_hidden.clamp_min(1.0))
+    first_dist = expected_distance[first_hidden]
+    last_dist = expected_distance[last_hidden]
+    duration_degradation = (
+        float(last_dist.mean().item() - first_dist.mean().item())
+        if first_dist.numel() > 0 and last_dist.numel() > 0
+        else float("nan")
+    )
     out: Dict[str, float] = {
         "hidden_nll": _safe_mean(nll[active]),
+        "hidden_surprise": _safe_mean(surprise[active]),
         "hidden_mass_radius": _safe_mean(mass[active]),
         "hidden_expected_distance": _safe_mean(expected_distance[active]),
         "hidden_mean_error": _safe_mean(mean_error[active]),
+        "hidden_entropy": _safe_mean(entropy[active]),
+        "reappearance_surprise": _safe_mean(surprise[reappeared]),
+        "occlusion_duration_degradation": duration_degradation,
         "hidden_count": float(hidden_mask.sum().item()),
     }
 
@@ -81,6 +105,7 @@ def particle_belief_metrics(
         contained = (truth_center_dist <= radius).float()
         key = f"coverage_{int(round(float(level) * 100))}"
         out[key] = _safe_mean(contained[active])
+        out[f"calibration_error_{int(round(float(level) * 100))}"] = abs(out[key] - float(level))
     return out
 
 

@@ -69,5 +69,35 @@
       "seq_len": 24,
       "obs_len": 7
     }
+  },
+  "test_structured_occlusion": {
+    "path": "data/manifests3d_mvp/test_structured_occlusion.jsonl",
+    "count": 32,
+    "tags": [
+      "test",
+      "targeted_occlusion",
+      "structured_occlusion"
+    ],
+    "overrides": {
+      "scenario": "structured_occlusion",
+      "path_mode": "linear",
+      "seq_len": 24,
+      "obs_len": 7
+    }
+  },
+  "test_impossible_reappearance": {
+    "path": "data/manifests3d_mvp/test_impossible_reappearance.jsonl",
+    "count": 32,
+    "tags": [
+      "test",
+      "targeted_occlusion",
+      "impossible_reappearance"
+    ],
+    "overrides": {
+      "scenario": "impossible_reappearance",
+      "path_mode": "impossible_jump",
+      "seq_len": 24,
+      "obs_len": 7
+    }
   }
 }

@@ -41,6 +41,8 @@ Included splits:
 - `test_unseen_speed.jsonl`: higher-speed generalization scenes
 - `test_unseen_occluders.jsonl`: shifted occluder-layout generalization scenes
 - `test_targeted_occlusion.jsonl`: controlled 3D object-permanence episodes where a target object starts visible, passes behind one or more varied occluders, and reappears
+- `test_structured_occlusion.jsonl`: targeted hidden episodes with curved or bounced hidden dynamics around physical obstacles
+- `test_impossible_reappearance.jsonl`: targeted episodes where the target reappears in a physically unlikely/impossible location for surprise scoring
 - `manifest_index.json`: split metadata and counts
 
 The corresponding Hugging Face dataset is `yajasm/world-model`, listed in the metadata block above. Generated caches remain local under `data/cache/` and are intentionally ignored.
@@ -107,12 +109,20 @@ python scripts/build_manifests3d.py --config configs/belief3d_smoke.yaml
 python scripts/evaluate_belief3d.py --config configs/belief3d_smoke.yaml
 ```
 
-Train and evaluate the first supervised image-to-belief encoder:
+Train and evaluate the learned baselines:
 
 ```bash
 python scripts/train_belief3d.py --config configs/belief3d_smoke.yaml
+python scripts/train_belief_jepa3d.py --config configs/belief3d_smoke.yaml
 python scripts/evaluate_belief3d.py --config configs/belief3d_smoke.yaml --mode all
 ```
+
+`evaluate_belief3d.py --mode all` compares:
+
+- `constant_velocity_particle_belief`
+- `geometry_aware_particle_belief`
+- `image_to_belief`
+- `belief_jepa_latent_predictor`
 
 For a more meaningful local MVP run:
 
@@ -133,10 +143,10 @@ python scripts/evaluate_belief3d.py --config configs/belief3d_large.yaml --mode 
 Export a visual 3D belief demo with RGB frames, depth, projected particles, the true hidden trajectory, and per-frame belief metrics:
 
 ```bash
-python scripts/export_belief3d_demo_assets.py --config configs/belief3d_smoke.yaml --seeds 2026
+python scripts/export_belief3d_demo_assets.py --config configs/belief3d_smoke.yaml --seeds 2026 --scenario structured_occlusion --mode compare
 ```
 
-By default the 3D demo uses the targeted occlusion scenario and writes target metadata, including `object_index`, `occlusion_start`, `occlusion_end`, `reappearance_frame`, `hidden_frames`, and target occluder indices.
+The 3D generator distinguishes visual occluders, physical obstacles, and solid screens. Targeted samples write metadata including `target_object_index`, `scenario`, `path_mode`, `occlusion_start`, `occlusion_end`, `reappearance_frame`, `hidden_frames`, `obstacle_ids`, `occluder_ids`, `collision_or_turn_frames`, `valid_route_id`, and `is_impossible_event`.
 
 This path is additive and does not modify the original 2D training pipeline.
 

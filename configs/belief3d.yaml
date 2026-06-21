@@ -29,6 +29,7 @@ data3d:
   light_dir_y: 0.45
   light_dir_z: 0.82
   scenario: random
+  path_mode: linear
   target_min_hidden: 5
   target_max_hidden: 14
   target_min_visible_tail: 5
@@ -73,3 +74,5 @@ eval:
     - test_unseen_speed
     - test_unseen_occluders
     - test_targeted_occlusion
+    - test_structured_occlusion
+    - test_impossible_reappearance

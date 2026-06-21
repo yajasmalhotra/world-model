@@ -18,7 +18,7 @@ if str(ROOT) not in sys.path:
 
 from src.data3d.dataset3d import scene3d_config_from_data_cfg
 from src.data3d.scene_generator3d import STATE_INDEX_3D, Scene3DConfig, SyntheticScene3DGenerator
-from src.models.belief_state import ParticleBeliefConfig, initialize_particles, rollout_particle_belief
+from src.models.belief_state import ParticleBeliefConfig, initialize_particles, rollout_geometry_aware_particle_belief, rollout_particle_belief
 from src.train.utils import get_device, load_config, set_seed
 
 
@@ -40,8 +40,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fps", type=int, default=6)
     parser.add_argument("--max-particles", type=int, default=192)
     parser.add_argument("--panel-scale", type=int, default=2)
-    parser.add_argument("--scenario", type=str, default="targeted_occlusion", choices=["random", "targeted_occlusion"])
-    parser.add_argument("--mode", type=str, default="physics", choices=["physics"])
+    parser.add_argument(
+        "--scenario",
+        type=str,
+        default="structured_occlusion",
+        choices=["random", "targeted_occlusion", "structured_occlusion", "impossible_reappearance"],
+    )
+    parser.add_argument("--mode", type=str, default="compare", choices=["constant", "geometry", "compare"])
     return parser.parse_args()
 
 
@@ -86,12 +91,25 @@ def draw_camera_belief_overlay(
     hidden: bool,
     max_particles: int,
     show_particles: bool = True,
+    secondary_particles: np.ndarray | None = None,
 ) -> np.ndarray:
     base = Image.fromarray(rgb).convert("RGBA")
     overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
 
     if show_particles:
+        if secondary_particles is not None and secondary_particles.shape[0] > 0:
+            secondary = secondary_particles
+            if secondary.shape[0] > max_particles:
+                stride = max(1, secondary.shape[0] // max_particles)
+                secondary = secondary[::stride][:max_particles]
+            px, py, depth = project_points(secondary[:, 0:3], cfg)
+            order = np.argsort(depth)[::-1]
+            for idx in order:
+                x = float(px[idx])
+                y = float(py[idx])
+                if 0 <= x < cfg.image_size and 0 <= y < cfg.image_size:
+                    draw.ellipse([x - 1.4, y - 1.4, x + 1.4, y + 1.4], fill=(*RGB_BLUE, 36))
         if particles.shape[0] > max_particles:
             # Deterministic stride keeps GIFs stable from run to run.
             stride = max(1, particles.shape[0] // max_particles)
@@ -144,6 +162,9 @@ def draw_3d_belief_panel(
     hidden: bool,
     max_particles: int,
     show_particles: bool = True,
+    secondary_particles: np.ndarray | None = None,
+    occluders: np.ndarray | None = None,
+    obstacles: np.ndarray | None = None,
 ) -> np.ndarray:
     size = cfg.image_size
     image = Image.new("RGB", (size, size), RGB_PANEL)
@@ -167,7 +188,44 @@ def draw_3d_belief_panel(
     for a, b in edges:
         draw.line([tuple(projected[a]), tuple(projected[b])], fill=RGB_GRID, width=1)
 
+    def draw_boxes(boxes: np.ndarray | None, fill: tuple[int, int, int], width: int) -> None:
+        if boxes is None:
+            return
+        for box in boxes:
+            if not np.any(box):
+                continue
+            x0, y0, z0, x1, y1, z1 = box.tolist()
+            corners = np.array(
+                [
+                    [x0, y0, z0],
+                    [x1, y0, z0],
+                    [x1, y1, z0],
+                    [x0, y1, z0],
+                    [x0, y0, z1],
+                    [x1, y0, z1],
+                    [x1, y1, z1],
+                    [x0, y1, z1],
+                ],
+                dtype=np.float32,
+            )
+            p = iso_project(corners, cfg, size)
+            for a, b in edges:
+                draw.line([tuple(p[a]), tuple(p[b])], fill=fill, width=width)
+
+    draw_boxes(occluders, (100, 116, 139), 1)
+    draw_boxes(obstacles, RGB_ORANGE, 2)
+
     if show_particles:
+        if secondary_particles is not None and secondary_particles.shape[0] > 0:
+            secondary = secondary_particles
+            if secondary.shape[0] > max_particles:
+                stride = max(1, secondary.shape[0] // max_particles)
+                secondary = secondary[::stride][:max_particles]
+            p2 = iso_project(secondary[:, 0:3], cfg, size)
+            for point in p2:
+                x, y = point.tolist()
+                if -4 <= x <= size + 4 and -4 <= y <= size + 4:
+                    draw.ellipse([x - 1.2, y - 1.2, x + 1.2, y + 1.2], fill=(59, 130, 246))
         if particles.shape[0] > max_particles:
             stride = max(1, particles.shape[0] // max_particles)
             particles = particles[::stride][:max_particles]
@@ -190,7 +248,13 @@ def draw_3d_belief_panel(
     return np.asarray(image)
 
 
-def draw_metric_panel(metrics: Dict[str, List[float]], frame_idx: int, width: int, height: int = 96) -> np.ndarray:
+def draw_metric_panel(
+    metrics: Dict[str, List[float]],
+    frame_idx: int,
+    width: int,
+    height: int = 112,
+    comparison: Dict[str, Dict[str, List[float]]] | None = None,
+) -> np.ndarray:
     image = Image.new("RGB", (width, height), "white")
     draw = ImageDraw.Draw(image)
     font = ImageFont.load_default()
@@ -223,6 +287,17 @@ def draw_metric_panel(metrics: Dict[str, List[float]], frame_idx: int, width: in
             if len(pts) >= 2:
                 draw.line(pts, fill=color, width=2)
         y += 22
+    if comparison:
+        constant = comparison["constant"]["expected_distance"][frame_idx]
+        geometry = comparison["geometry"]["expected_distance"][frame_idx]
+        label = "dist constant/geometry"
+        value = (
+            f"{constant:.3f} / {geometry:.3f}"
+            if np.isfinite(constant) and np.isfinite(geometry)
+            else "n/a"
+        )
+        draw.text((width - 190, 8), label, fill=RGB_DARK, font=font)
+        draw.text((width - 190, 22), value, fill=RGB_BLUE, font=font)
     phase = metrics["phase"][frame_idx]
     draw.text((8, height - 18), f"phase: {phase}", fill=RGB_ORANGE if phase == "hidden rollout" else RGB_DARK, font=font)
     return np.asarray(image)
@@ -261,10 +336,14 @@ def choose_focus_object(future_state: np.ndarray, future_mask: np.ndarray) -> in
 
 
 def demo_overrides(scene_cfg: Scene3DConfig, scenario: str) -> Dict[str, object]:
-    if scenario != "targeted_occlusion":
+    if scenario == "random":
         return {"scenario": "random"}
+    path_mode = "linear"
+    if scenario == "impossible_reappearance":
+        path_mode = "impossible_jump"
     return {
-        "scenario": "targeted_occlusion",
+        "scenario": scenario,
+        "path_mode": path_mode,
         "seq_len": max(scene_cfg.seq_len, scene_cfg.obs_len + 14, 24),
         "obs_len": scene_cfg.obs_len,
     }
@@ -335,6 +414,7 @@ def build_demo_for_seed(
     max_particles: int,
     panel_scale: int,
     scenario: str,
+    mode: str,
 ) -> None:
     generator = SyntheticScene3DGenerator(scene_cfg)
     overrides = demo_overrides(scene_cfg, scenario)
@@ -351,10 +431,25 @@ def build_demo_for_seed(
     object_mask = torch.from_numpy(sample["object_mask"][obs_len - 1 : obs_len]).to(device)
     particle_cfg = ParticleBeliefConfig.from_config(config["belief"], sample["metadata"]["config"])
     init_particles, _init_weights = initialize_particles(init_state, object_mask, particle_cfg)
-    particles, weights = rollout_particle_belief(init_state, object_mask, horizon=horizon, cfg=particle_cfg)
+    constant_particles, constant_weights = rollout_particle_belief(init_state, object_mask, horizon=horizon, cfg=particle_cfg)
+    geometry_particles, geometry_weights = rollout_geometry_aware_particle_belief(
+        init_state,
+        object_mask,
+        torch.from_numpy(sample["obstacles"]).unsqueeze(0).to(device),
+        horizon=horizon,
+        cfg=particle_cfg,
+    )
     init_particles_np = init_particles.squeeze(0).detach().cpu().numpy()
-    particles_np = particles.squeeze(0).detach().cpu().numpy()
-    weights_np = weights.squeeze(0).detach().cpu().numpy()
+    constant_particles_np = constant_particles.squeeze(0).detach().cpu().numpy()
+    constant_weights_np = constant_weights.squeeze(0).detach().cpu().numpy()
+    geometry_particles_np = geometry_particles.squeeze(0).detach().cpu().numpy()
+    geometry_weights_np = geometry_weights.squeeze(0).detach().cpu().numpy()
+    if mode == "constant":
+        particles_np, weights_np = constant_particles_np, constant_weights_np
+        mode_label = "constant_velocity_particle_belief"
+    else:
+        particles_np, weights_np = geometry_particles_np, geometry_weights_np
+        mode_label = "geometry_aware_particle_belief" if mode == "geometry" else "constant_vs_geometry_particle_belief"
 
     rollout_metrics = per_frame_metrics(
         particles=particles_np,
@@ -365,6 +460,34 @@ def build_demo_for_seed(
         mass_radius=float(config["belief"]["mass_radius"]),
     )
     metrics = combine_metrics(visible_prefix_metrics(obs_len), rollout_metrics, obs_len=obs_len)
+    comparison = None
+    if mode == "compare":
+        comparison = {
+            "constant": combine_metrics(
+                visible_prefix_metrics(obs_len),
+                per_frame_metrics(
+                    particles=constant_particles_np,
+                    weights=constant_weights_np,
+                    true_state=future_state,
+                    obj_idx=focus_obj,
+                    density_sigma=float(config["belief"]["density_sigma"]),
+                    mass_radius=float(config["belief"]["mass_radius"]),
+                ),
+                obs_len=obs_len,
+            ),
+            "geometry": combine_metrics(
+                visible_prefix_metrics(obs_len),
+                per_frame_metrics(
+                    particles=geometry_particles_np,
+                    weights=geometry_weights_np,
+                    true_state=future_state,
+                    obj_idx=focus_obj,
+                    density_sigma=float(config["belief"]["density_sigma"]),
+                    mass_radius=float(config["belief"]["mass_radius"]),
+                ),
+                obs_len=obs_len,
+            ),
+        }
 
     frames: List[np.ndarray] = []
     total_steps = obs_len + horizon
@@ -375,12 +498,19 @@ def build_demo_for_seed(
         hidden = bool(sample["state"][frame_idx, focus_obj, STATE_INDEX_3D["occluded"]] > 0.5)
         if frame_idx < obs_len - 1:
             particle_cloud = empty_particles
+            secondary_cloud = None
             show_particles = False
         elif frame_idx == obs_len - 1:
             particle_cloud = init_particles_np[focus_obj]
+            secondary_cloud = None
             show_particles = True
         else:
             particle_cloud = particles_np[frame_idx - obs_len, focus_obj]
+            secondary_cloud = (
+                constant_particles_np[frame_idx - obs_len, focus_obj]
+                if mode == "compare"
+                else None
+            )
             show_particles = True
 
         rgb_panel = make_panel(sample["frames"][frame_idx], "RGB camera", panel_scale)
@@ -393,6 +523,7 @@ def build_demo_for_seed(
             hidden=hidden,
             max_particles=max_particles,
             show_particles=show_particles,
+            secondary_particles=secondary_cloud,
         )
         overlay_panel = make_panel(overlay, "Belief particles + truth", panel_scale)
         world = draw_3d_belief_panel(
@@ -403,10 +534,13 @@ def build_demo_for_seed(
             hidden=hidden,
             max_particles=max_particles,
             show_particles=show_particles,
+            secondary_particles=secondary_cloud,
+            occluders=sample["occluders"],
+            obstacles=sample["obstacles"],
         )
         world_panel = make_panel(world, "3D belief / trajectory", panel_scale)
         top = hstack_with_border([rgb_panel, depth_panel, overlay_panel, world_panel])
-        metrics_panel = draw_metric_panel(metrics, frame_idx, width=top.shape[1])
+        metrics_panel = draw_metric_panel(metrics, frame_idx, width=top.shape[1], comparison=comparison)
         frames.append(vstack([top, metrics_panel]))
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -419,13 +553,14 @@ def build_demo_for_seed(
     serializable = {
         "seed": seed,
         "focus_object": focus_obj,
-        "mode": "physics_particle_belief",
+        "mode": mode_label,
         "scenario": sample["metadata"]["scenario"],
         "obs_len": obs_len,
         "horizon": horizon,
         "total_frames": total_steps,
         "target": target_metadata,
         "metrics": metrics,
+        "comparison_metrics": comparison,
         "artifacts": {"gif": str(gif_path), "preview": str(preview_path)},
     }
     metrics_path = output_dir / f"seed_{seed}_belief3d_metrics.json"
@@ -453,6 +588,7 @@ def main() -> None:
             max_particles=int(args.max_particles),
             panel_scale=max(1, int(args.panel_scale)),
             scenario=args.scenario,
+            mode=args.mode,
         )
 
 

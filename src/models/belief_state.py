@@ -42,6 +42,39 @@ def _bounce_particles(pos: torch.Tensor, vel: torch.Tensor, size: torch.Tensor, 
     return pos, vel
 
 
+def _bounce_particles_against_obstacles(
+    pos: torch.Tensor,
+    vel: torch.Tensor,
+    size: torch.Tensor,
+    obstacles: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if obstacles.numel() == 0:
+        return pos, vel
+    eps = 1e-4
+    pad = size.unsqueeze(-1)
+    for idx in range(obstacles.shape[1]):
+        box = obstacles[:, idx]
+        active = torch.any(box != 0, dim=-1)
+        if not bool(active.any()):
+            continue
+        lo = torch.minimum(box[:, 0:3], box[:, 3:6])[:, None, None, :] - pad
+        hi = torch.maximum(box[:, 0:3], box[:, 3:6])[:, None, None, :] + pad
+        inside = torch.all((pos >= lo) & (pos <= hi), dim=-1) & active[:, None, None]
+        if not bool(inside.any()):
+            continue
+        lower_penetration = pos - lo
+        upper_penetration = hi - pos
+        penetration = torch.minimum(lower_penetration, upper_penetration)
+        axis = torch.argmin(penetration, dim=-1)
+        axis_mask = torch.nn.functional.one_hot(axis, num_classes=3).to(dtype=torch.bool, device=pos.device)
+        hit_axis = inside.unsqueeze(-1) & axis_mask
+        reflected_vel = torch.where(hit_axis, -vel, vel)
+        exit_pos = torch.where(vel >= 0.0, lo - eps, hi + eps)
+        pos = torch.where(hit_axis, exit_pos, pos)
+        vel = reflected_vel
+    return pos, vel
+
+
 def initialize_particles(
     initial_state: torch.Tensor,
     object_mask: torch.Tensor,
@@ -173,3 +206,65 @@ def rollout_particle_belief(
         outputs.append(particles)
         weight_outputs.append(weights)
     return torch.stack(outputs, dim=1), torch.stack(weight_outputs, dim=1)
+
+
+def rollout_geometry_aware_particle_belief(
+    initial_state: torch.Tensor,
+    object_mask: torch.Tensor,
+    obstacles: torch.Tensor,
+    horizon: int,
+    cfg: ParticleBeliefConfig,
+    generator: torch.Generator | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Particle rollout that respects physical obstacles/solid screens in addition
+    to world bounds. Visual-only occluders should not be passed here.
+    """
+    particles, weights = initialize_particles(initial_state, object_mask, cfg, generator=generator)
+    size = initial_state[..., STATE_INDEX_3D["size"]].unsqueeze(-1).expand(-1, -1, cfg.num_particles)
+    outputs = []
+    weight_outputs = []
+    for _ in range(horizon):
+        pos = particles[..., 0:3]
+        vel = particles[..., 3:6]
+        pos_noise = torch.randn(pos.shape, device=pos.device, dtype=pos.dtype, generator=generator) * cfg.process_pos_noise
+        vel_noise = torch.randn(vel.shape, device=vel.device, dtype=vel.dtype, generator=generator) * cfg.process_vel_noise
+        vel = vel + vel_noise
+        pos = pos + vel + pos_noise
+        pos, vel = _bounce_particles_against_obstacles(pos, vel, size, obstacles)
+        pos, vel = _bounce_particles(pos, vel, size, cfg)
+        particles = torch.cat([pos, vel], dim=-1)
+        outputs.append(particles)
+        weight_outputs.append(weights)
+    return torch.stack(outputs, dim=1), torch.stack(weight_outputs, dim=1)
+
+
+def particles_from_gaussian_sequence(
+    belief_mean: torch.Tensor,
+    belief_log_std: torch.Tensor,
+    object_mask: torch.Tensor,
+    cfg: ParticleBeliefConfig,
+    generator: torch.Generator | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Convert a per-timestep Gaussian trajectory belief into particles.
+
+    Args:
+        belief_mean: [B, H, O, 6]
+        belief_log_std: [B, H, O, 6]
+        object_mask: [B, O]
+    Returns:
+        particles: [B, H, O, P, 6]
+        weights: [B, H, O, P]
+    """
+    bsz, horizon, n_obj, _ = belief_mean.shape
+    device = belief_mean.device
+    dtype = belief_mean.dtype
+    eps = torch.randn((bsz, horizon, n_obj, cfg.num_particles, 6), device=device, dtype=dtype, generator=generator)
+    std = torch.exp(belief_log_std).clamp_min(1e-4)
+    particles = belief_mean.unsqueeze(3) + eps * std.unsqueeze(3)
+    pos = particles[..., 0:3].clamp(cfg.world_min, cfg.world_max)
+    particles = torch.cat([pos, particles[..., 3:6]], dim=-1)
+    weights = torch.ones((bsz, horizon, n_obj, cfg.num_particles), device=device, dtype=dtype) / float(cfg.num_particles)
+    weights = weights * object_mask[:, None, :, None]
+    return particles, weights

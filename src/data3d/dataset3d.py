@@ -33,6 +33,7 @@ SCENE3D_CONFIG_KEYS = {
     "light_dir_y",
     "light_dir_z",
     "scenario",
+    "path_mode",
     "target_min_hidden",
     "target_max_hidden",
     "target_min_visible_tail",
@@ -70,6 +71,10 @@ class SyntheticScene3DDataset(Dataset):
         state = sample["state"].astype(np.float32)
         object_mask = sample["object_mask"].astype(np.float32)
         occluders = sample["occluders"].astype(np.float32)
+        visual_occluders = sample["visual_occluders"].astype(np.float32)
+        physical_obstacles = sample["physical_obstacles"].astype(np.float32)
+        solid_screens = sample["solid_screens"].astype(np.float32)
+        obstacles = sample["obstacles"].astype(np.float32)
 
         obs_frames = frames[: self.obs_len]
         future_frames = frames[self.obs_len :]
@@ -94,6 +99,10 @@ class SyntheticScene3DDataset(Dataset):
             "obs_mask": torch.from_numpy(obs_mask),
             "future_mask": torch.from_numpy(future_mask),
             "occluders": torch.from_numpy(occluders),
+            "visual_occluders": torch.from_numpy(visual_occluders),
+            "physical_obstacles": torch.from_numpy(physical_obstacles),
+            "solid_screens": torch.from_numpy(solid_screens),
+            "obstacles": torch.from_numpy(obstacles),
         }
 
 
@@ -109,6 +118,10 @@ def collate_scenes3d(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
         "obs_mask",
         "future_mask",
         "occluders",
+        "visual_occluders",
+        "physical_obstacles",
+        "solid_screens",
+        "obstacles",
     }
     for key in batch[0].keys():
         if key in tensor_keys:

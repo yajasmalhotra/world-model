@@ -82,6 +82,30 @@ def main() -> None:
                 "obs_len": obs_len,
             },
         ),
+        ManifestSpec(
+            "test_structured_occlusion",
+            17_000_000,
+            test_count,
+            tags=["test", "targeted_occlusion", "structured_occlusion"],
+            overrides={
+                "scenario": "structured_occlusion",
+                "path_mode": "linear",
+                "seq_len": targeted_seq_len,
+                "obs_len": obs_len,
+            },
+        ),
+        ManifestSpec(
+            "test_impossible_reappearance",
+            18_000_000,
+            test_count,
+            tags=["test", "targeted_occlusion", "impossible_reappearance"],
+            overrides={
+                "scenario": "impossible_reappearance",
+                "path_mode": "impossible_jump",
+                "seq_len": targeted_seq_len,
+                "obs_len": obs_len,
+            },
+        ),
     ]
 
     index = {}
