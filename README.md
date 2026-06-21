@@ -134,6 +134,12 @@ The JEPA run logs latent diagnostics including `latent_mse`, `target_recon_mse`,
 
 Geometry-aware evaluation also reports counterfactual sensitivity: `counterfactual_physical_belief_delta` should rise when physical obstacles are moved, while `counterfactual_visual_belief_delta` should stay near zero for visual-only changes.
 
+Write a compact benchmark report from the latest Belief3D evaluation run:
+
+```bash
+python scripts/report_belief3d.py --output-dir results/belief3d_report
+```
+
 For a more meaningful local MVP run:
 
 ```bash

@@ -53,11 +53,32 @@ def init_run_dir(output_root: str | Path, experiment_name: str, config: Dict[str
 def append_metrics(run_dir: str | Path, row: Dict[str, Any]) -> None:
     run_dir = Path(run_dir)
     metrics_path = run_dir / "metrics.csv"
-    write_header = not metrics_path.exists()
-    with metrics_path.open("a", encoding="utf-8", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=list(row.keys()))
-        if write_header:
+    if not metrics_path.exists():
+        with metrics_path.open("w", encoding="utf-8", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=list(row.keys()))
             writer.writeheader()
+            writer.writerow(row)
+        return
+
+    with metrics_path.open("r", encoding="utf-8", newline="") as f:
+        reader = csv.DictReader(f)
+        fieldnames = list(reader.fieldnames or [])
+        existing_rows = list(reader)
+
+    new_fields = [key for key in row.keys() if key not in fieldnames]
+    if new_fields:
+        fieldnames = fieldnames + new_fields
+        with metrics_path.open("w", encoding="utf-8", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+            writer.writeheader()
+            for existing in existing_rows:
+                existing.pop(None, None)
+                writer.writerow(existing)
+            writer.writerow(row)
+        return
+
+    with metrics_path.open("a", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
         writer.writerow(row)
 
 
@@ -75,4 +96,3 @@ def save_checkpoint(path: str | Path, state: Dict[str, Any]) -> None:
 
 def load_checkpoint(path: str | Path, device: torch.device) -> Dict[str, Any]:
     return torch.load(Path(path), map_location=device)
-
