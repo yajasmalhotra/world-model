@@ -117,12 +117,22 @@ python scripts/train_belief_jepa3d.py --config configs/belief3d_smoke.yaml
 python scripts/evaluate_belief3d.py --config configs/belief3d_smoke.yaml --mode all
 ```
 
+Belief-JEPA training uses an EMA target encoder by default. For an ablation:
+
+```bash
+python scripts/train_belief_jepa3d.py --config configs/belief3d_smoke.yaml --no-ema
+```
+
+The JEPA run logs latent diagnostics including `latent_mse`, `target_recon_mse`, `pred_target_cosine`, `target_latent_std`, `pred_latent_std`, and `ema_online_drift`; evaluation adds `jepa_*` diagnostics while keeping predictions context-only.
+
 `evaluate_belief3d.py --mode all` compares:
 
 - `constant_velocity_particle_belief`
 - `geometry_aware_particle_belief`
 - `image_to_belief`
 - `belief_jepa_latent_predictor`
+
+Geometry-aware evaluation also reports counterfactual sensitivity: `counterfactual_physical_belief_delta` should rise when physical obstacles are moved, while `counterfactual_visual_belief_delta` should stay near zero for visual-only changes.
 
 For a more meaningful local MVP run:
 

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import copy
+
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 class BeliefJEPA3D(nn.Module):
@@ -59,6 +62,40 @@ class BeliefJEPA3D(nn.Module):
             nn.ReLU(),
             nn.Linear(latent_dim, latent_dim),
         )
+        self.ema_target_encoder = copy.deepcopy(self.target_encoder)
+        self.target_decoder = nn.Sequential(
+            nn.Linear(latent_dim, latent_dim),
+            nn.ReLU(),
+            nn.Linear(latent_dim, 7),
+        )
+        self._set_ema_requires_grad(False)
+
+    def _set_ema_requires_grad(self, requires_grad: bool) -> None:
+        for param in self.ema_target_encoder.parameters():
+            param.requires_grad = requires_grad
+
+    @torch.no_grad()
+    def sync_ema_target_encoder(self) -> None:
+        self.ema_target_encoder.load_state_dict(self.target_encoder.state_dict())
+        self._set_ema_requires_grad(False)
+
+    @torch.no_grad()
+    def update_ema_target_encoder(self, decay: float) -> None:
+        decay = float(decay)
+        for ema_param, online_param in zip(self.ema_target_encoder.parameters(), self.target_encoder.parameters()):
+            ema_param.mul_(decay).add_(online_param, alpha=1.0 - decay)
+        for ema_buffer, online_buffer in zip(self.ema_target_encoder.buffers(), self.target_encoder.buffers()):
+            ema_buffer.copy_(online_buffer)
+        self._set_ema_requires_grad(False)
+
+    @torch.no_grad()
+    def ema_online_drift(self) -> torch.Tensor:
+        diffs = []
+        for ema_param, online_param in zip(self.ema_target_encoder.parameters(), self.target_encoder.parameters()):
+            diffs.append(torch.mean((ema_param - online_param) ** 2))
+        if not diffs:
+            return torch.tensor(0.0)
+        return torch.sqrt(torch.stack(diffs).mean())
 
     def _encode_context(self, frames: torch.Tensor) -> torch.Tensor:
         bsz, steps, channels, height, width = frames.shape
@@ -67,7 +104,28 @@ class BeliefJEPA3D(nn.Module):
         _, hidden = self.temporal(encoded)
         return self.context_proj(hidden[-1])
 
-    def forward(self, frames: torch.Tensor, future_state: torch.Tensor | None = None) -> dict[str, torch.Tensor]:
+    def _target_input(self, future_state: torch.Tensor, steps: int) -> torch.Tensor:
+        target_dyn = future_state[:, :steps, :, 0:6]
+        target_occ = future_state[:, :steps, :, 7:8]
+        return torch.cat([target_dyn, target_occ], dim=-1)
+
+    def _pad_horizon(self, values: torch.Tensor, batch_size: int) -> torch.Tensor:
+        if values.shape[1] >= self.horizon:
+            return values
+        pad = torch.zeros(
+            (batch_size, self.horizon - values.shape[1], self.max_objects, values.shape[-1]),
+            device=values.device,
+            dtype=values.dtype,
+        )
+        return torch.cat([values, pad], dim=1)
+
+    def forward(
+        self,
+        frames: torch.Tensor,
+        future_state: torch.Tensor | None = None,
+        use_ema_target: bool = True,
+        include_target_reconstruction: bool = True,
+    ) -> dict[str, torch.Tensor]:
         bsz = frames.shape[0]
         context = self._encode_context(frames)
         raw = self.predictor(context).reshape(bsz, self.horizon, self.max_objects, self.latent_dim + 12)
@@ -85,18 +143,17 @@ class BeliefJEPA3D(nn.Module):
         out = {"mean": mean, "log_std": log_std, "pred_latent": pred_latent}
         if future_state is not None:
             steps = min(self.horizon, future_state.shape[1])
-            target_dyn = future_state[:, :steps, :, 0:6]
-            target_occ = future_state[:, :steps, :, 7:8]
-            target_input = torch.cat([target_dyn, target_occ], dim=-1)
-            target_latent = self.target_encoder(target_input)
-            if steps < self.horizon:
-                pad = torch.zeros(
-                    (bsz, self.horizon - steps, self.max_objects, self.latent_dim),
-                    device=frames.device,
-                    dtype=frames.dtype,
-                )
-                target_latent = torch.cat([target_latent, pad], dim=1)
-            out["target_latent"] = target_latent.detach()
+            target_input = self._target_input(future_state, steps)
+            with torch.no_grad():
+                target_encoder = self.ema_target_encoder if use_ema_target else self.target_encoder
+                target_latent = target_encoder(target_input)
+            out["target_latent"] = self._pad_horizon(target_latent, bsz).detach()
+            if include_target_reconstruction:
+                online_target_latent = self.target_encoder(target_input)
+                target_reconstruction = self.target_decoder(online_target_latent)
+                out["target_input"] = self._pad_horizon(target_input, bsz)
+                out["online_target_latent"] = self._pad_horizon(online_target_latent, bsz)
+                out["target_reconstruction"] = self._pad_horizon(target_reconstruction, bsz)
         return out
 
 
@@ -106,6 +163,7 @@ def belief_jepa_loss(
     future_mask: torch.Tensor,
     latent_weight: float = 1.0,
     belief_weight: float = 0.5,
+    target_recon_weight: float = 0.1,
 ) -> dict[str, torch.Tensor]:
     steps = min(outputs["mean"].shape[1], future_state.shape[1])
     mask = future_mask[:, :steps].unsqueeze(-1)
@@ -119,8 +177,45 @@ def belief_jepa_loss(
     target_latent = outputs["target_latent"][:, :steps]
     pred_latent = outputs["pred_latent"][:, :steps]
     latent_mse = (((pred_latent - target_latent) ** 2) * mask).sum() / mask.sum().clamp_min(1.0)
+    target_reconstruction = outputs["target_reconstruction"][:, :steps]
+    target_input = outputs["target_input"][:, :steps]
+    target_recon_mse = (((target_reconstruction - target_input) ** 2) * mask).sum() / mask.sum().clamp_min(1.0)
 
     pos_rmse = torch.sqrt(((mean[..., 0:3] - target[..., 0:3]) ** 2).sum(dim=-1).clamp_min(1e-12))
     pos_rmse = (pos_rmse * future_mask[:, :steps]).sum() / future_mask[:, :steps].sum().clamp_min(1.0)
-    total = latent_weight * latent_mse + belief_weight * belief_nll
-    return {"total": total, "latent_mse": latent_mse, "belief_nll": belief_nll, "pos_rmse": pos_rmse}
+    pred_std = pred_latent[mask.expand_as(pred_latent) > 0.5].std(unbiased=False)
+    target_std = target_latent[mask.expand_as(target_latent) > 0.5].std(unbiased=False)
+    cosine = F.cosine_similarity(pred_latent, target_latent, dim=-1)
+    pred_target_cosine = (cosine * future_mask[:, :steps]).sum() / future_mask[:, :steps].sum().clamp_min(1.0)
+    total = latent_weight * latent_mse + belief_weight * belief_nll + target_recon_weight * target_recon_mse
+    return {
+        "total": total,
+        "latent_mse": latent_mse,
+        "belief_nll": belief_nll,
+        "target_recon_mse": target_recon_mse,
+        "pos_rmse": pos_rmse,
+        "target_latent_std": target_std,
+        "pred_latent_std": pred_std,
+        "pred_target_cosine": pred_target_cosine,
+    }
+
+
+@torch.no_grad()
+def belief_jepa_diagnostics(
+    outputs: dict[str, torch.Tensor],
+    future_state: torch.Tensor,
+    future_mask: torch.Tensor,
+) -> dict[str, torch.Tensor]:
+    steps = min(outputs["mean"].shape[1], future_state.shape[1])
+    mask = future_mask[:, :steps].unsqueeze(-1)
+    pred_latent = outputs["pred_latent"][:, :steps]
+    target_latent = outputs["target_latent"][:, :steps]
+    latent_mse = (((pred_latent - target_latent) ** 2) * mask).sum() / mask.sum().clamp_min(1.0)
+    cosine = F.cosine_similarity(pred_latent, target_latent, dim=-1)
+    pred_target_cosine = (cosine * future_mask[:, :steps]).sum() / future_mask[:, :steps].sum().clamp_min(1.0)
+    return {
+        "latent_mse": latent_mse,
+        "pred_target_cosine": pred_target_cosine,
+        "target_latent_std": target_latent[mask.expand_as(target_latent) > 0.5].std(unbiased=False),
+        "pred_latent_std": pred_latent[mask.expand_as(pred_latent) > 0.5].std(unbiased=False),
+    }

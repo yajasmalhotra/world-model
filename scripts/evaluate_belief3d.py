@@ -15,8 +15,9 @@ if str(ROOT) not in sys.path:
 
 from src.data3d.dataset3d import SyntheticScene3DDataset, collate_scenes3d
 from src.eval.belief_metrics import particle_belief_metrics, summarize_metric_rows
+from src.eval.counterfactual import counterfactual_delta_metrics, move_boxes_to_far_corner
 from src.models.belief_encoder3d import ImageToBeliefEncoder3D
-from src.models.belief_jepa3d import BeliefJEPA3D
+from src.models.belief_jepa3d import BeliefJEPA3D, belief_jepa_diagnostics
 from src.models.belief_state import (
     ParticleBeliefConfig,
     particles_from_gaussian_sequence,
@@ -54,6 +55,14 @@ def latest_checkpoint(pattern: str) -> Optional[str]:
     return str(candidates[-1])
 
 
+def latest_jepa_checkpoint() -> Optional[str]:
+    candidates = sorted(Path("runs").glob("*_train_belief_jepa3d*/checkpoints/best.pt"))
+    if not candidates:
+        return None
+    ema_candidates = [path for path in candidates if "noema" not in str(path)]
+    return str((ema_candidates or candidates)[-1])
+
+
 def load_image_encoder(config: Dict, device: torch.device, ckpt_path: Optional[str]) -> ImageToBeliefEncoder3D:
     model_cfg = config["model3d"]
     data_cfg = config["data3d"]
@@ -73,12 +82,13 @@ def load_image_encoder(config: Dict, device: torch.device, ckpt_path: Optional[s
     return model
 
 
-def load_belief_jepa(config: Dict, device: torch.device, ckpt_path: str) -> tuple[BeliefJEPA3D, bool]:
+def load_belief_jepa(config: Dict, device: torch.device, ckpt_path: str) -> tuple[BeliefJEPA3D, bool, bool]:
     ckpt = load_checkpoint(ckpt_path, device)
     ckpt_config = ckpt.get("config", config)
     model_cfg = ckpt_config["model3d"]
     data_cfg = ckpt_config["data3d"]
     rgbd = bool(ckpt.get("rgbd", False))
+    ema_enabled = bool(ckpt.get("ema_enabled", False))
     horizon = max(int(data_cfg["seq_len"]), int(data_cfg["obs_len"]) + 14, 24) - int(data_cfg["obs_len"])
     model = BeliefJEPA3D(
         max_objects=int(model_cfg["max_objects"]),
@@ -93,8 +103,10 @@ def load_belief_jepa(config: Dict, device: torch.device, ckpt_path: str) -> tupl
         min_log_std=float(model_cfg["min_log_std"]),
         max_log_std=float(model_cfg.get("jepa_max_log_std", -0.8)),
     ).to(device)
-    model.load_state_dict(ckpt["model_state"], strict=False)
-    return model, rgbd
+    incompatible = model.load_state_dict(ckpt["model_state"], strict=False)
+    if any(key.startswith("ema_target_encoder.") for key in incompatible.missing_keys):
+        model.sync_ema_target_encoder()
+    return model, rgbd, ema_enabled
 
 
 def context_frames(batch: Dict, device: torch.device, rgbd: bool) -> torch.Tensor:
@@ -121,6 +133,26 @@ def target_object_mask(batch: Dict, future_mask: torch.Tensor) -> Optional[torch
     return target_mask if found else None
 
 
+def seeded_geometry_rollout(
+    init_state: torch.Tensor,
+    object_mask: torch.Tensor,
+    obstacles: torch.Tensor,
+    horizon: int,
+    particle_cfg: ParticleBeliefConfig,
+    seed: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    torch.manual_seed(int(seed))
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(int(seed))
+    return rollout_geometry_aware_particle_belief(
+        init_state,
+        object_mask,
+        obstacles,
+        horizon=horizon,
+        cfg=particle_cfg,
+    )
+
+
 @torch.no_grad()
 def evaluate_split(
     loader: DataLoader,
@@ -130,6 +162,7 @@ def evaluate_split(
     encoder: Optional[ImageToBeliefEncoder3D] = None,
     jepa: Optional[BeliefJEPA3D] = None,
     jepa_rgbd: bool = False,
+    jepa_ema_enabled: bool = False,
 ) -> Dict[str, float]:
     data_cfg = config["data3d"]
     belief_cfg = config["belief"]
@@ -140,7 +173,7 @@ def evaluate_split(
     if jepa is not None:
         jepa.eval()
 
-    for batch in loader:
+    for batch_idx, batch in enumerate(loader):
         obs_frames = batch["obs_frames"].to(device)
         obs_state = batch["obs_state"].to(device)
         future_state = batch["future_state"].to(device)
@@ -164,7 +197,12 @@ def evaluate_split(
         elif mode == "jepa":
             if jepa is None:
                 raise RuntimeError("JEPA mode requires a Belief-JEPA checkpoint.")
-            outputs = jepa(context_frames(batch, device, jepa_rgbd))
+            outputs = jepa(
+                context_frames(batch, device, jepa_rgbd),
+                future_state=future_state,
+                use_ema_target=jepa_ema_enabled,
+                include_target_reconstruction=False,
+            )
             steps = min(outputs["mean"].shape[1], horizon)
             particles, weights = particles_from_gaussian_sequence(
                 outputs["mean"][:, :steps],
@@ -174,13 +212,38 @@ def evaluate_split(
             )
             future_state = future_state[:, :steps]
             future_mask = future_mask[:, :steps]
+            diagnostics = belief_jepa_diagnostics(outputs, future_state, future_mask)
         elif mode == "geometry":
-            particles, weights = rollout_geometry_aware_particle_belief(
+            rollout_seed = int(config["project"].get("seed", 0)) + 10_007 * int(batch_idx + 1)
+            obstacles = batch["obstacles"].to(device)
+            particles, weights = seeded_geometry_rollout(
                 init_state,
                 object_mask,
-                batch["obstacles"].to(device),
-                horizon=horizon,
-                cfg=particle_cfg,
+                obstacles,
+                horizon,
+                particle_cfg,
+                rollout_seed,
+            )
+            moved_obstacles = move_boxes_to_far_corner(
+                obstacles,
+                world_min=float(data_cfg.get("world_min", -1.0)),
+                world_max=float(data_cfg.get("world_max", 1.0)),
+            )
+            physical_cf_particles, physical_cf_weights = seeded_geometry_rollout(
+                init_state,
+                object_mask,
+                moved_obstacles,
+                horizon,
+                particle_cfg,
+                rollout_seed,
+            )
+            visual_cf_particles, visual_cf_weights = seeded_geometry_rollout(
+                init_state,
+                object_mask,
+                obstacles,
+                horizon,
+                particle_cfg,
+                rollout_seed,
             )
         else:
             particles, weights = rollout_particle_belief(init_state, object_mask, horizon=horizon, cfg=particle_cfg)
@@ -205,6 +268,61 @@ def evaluate_split(
                 credible_levels=belief_cfg.get("credible_levels", [0.5, 0.7, 0.9]),
             )
             metrics.update({f"target_{key}": value for key, value in target_metrics.items()})
+        if mode == "geometry":
+            metrics.update(
+                counterfactual_delta_metrics(
+                    particles,
+                    weights,
+                    physical_cf_particles,
+                    physical_cf_weights,
+                    future_state,
+                    future_mask,
+                    prefix="counterfactual_physical",
+                )
+            )
+            metrics.update(
+                counterfactual_delta_metrics(
+                    particles,
+                    weights,
+                    visual_cf_particles,
+                    visual_cf_weights,
+                    future_state,
+                    future_mask,
+                    prefix="counterfactual_visual",
+                )
+            )
+            metrics["counterfactual_selectivity"] = (
+                metrics["counterfactual_physical_belief_delta"] - metrics["counterfactual_visual_belief_delta"]
+            )
+            if target_mask is not None:
+                metrics.update(
+                    counterfactual_delta_metrics(
+                        particles,
+                        weights,
+                        physical_cf_particles,
+                        physical_cf_weights,
+                        future_state,
+                        target_mask,
+                        prefix="target_counterfactual_physical",
+                    )
+                )
+                metrics.update(
+                    counterfactual_delta_metrics(
+                        particles,
+                        weights,
+                        visual_cf_particles,
+                        visual_cf_weights,
+                        future_state,
+                        target_mask,
+                        prefix="target_counterfactual_visual",
+                    )
+                )
+                metrics["target_counterfactual_selectivity"] = (
+                    metrics["target_counterfactual_physical_belief_delta"]
+                    - metrics["target_counterfactual_visual_belief_delta"]
+                )
+        if mode == "jepa":
+            metrics.update({f"jepa_{key}": float(value.detach().cpu().item()) for key, value in diagnostics.items()})
         rows.append(metrics)
     return summarize_metric_rows(rows)
 
@@ -217,7 +335,7 @@ def main() -> None:
     if args.mode in ("image", "all") and args.encoder_ckpt is None:
         args.encoder_ckpt = latest_checkpoint("*_train_belief3d_encoder/checkpoints/best.pt")
     if args.mode in ("jepa", "all") and args.jepa_ckpt is None:
-        args.jepa_ckpt = latest_checkpoint("*_train_belief_jepa3d*/checkpoints/best.pt")
+        args.jepa_ckpt = latest_jepa_checkpoint()
     manifest_dir = Path(config["data3d"]["manifest_dir"])
     splits = [args.split] if args.split else list(config["eval"]["slices"])
     batch_size = int(config["eval"].get("batch_size", 8))
@@ -237,8 +355,9 @@ def main() -> None:
     )
     belief_jepa: Optional[BeliefJEPA3D] = None
     jepa_rgbd = False
+    jepa_ema_enabled = False
     if args.mode in ("jepa", "all") and args.jepa_ckpt is not None:
-        belief_jepa, jepa_rgbd = load_belief_jepa(config, device, args.jepa_ckpt)
+        belief_jepa, jepa_rgbd, jepa_ema_enabled = load_belief_jepa(config, device, args.jepa_ckpt)
 
     for split in splits:
         manifest_path = manifest_dir / f"{split}.jsonl"
@@ -271,7 +390,16 @@ def main() -> None:
             if belief_jepa is None:
                 print("Skipping Belief-JEPA mode because no checkpoint was found.")
             else:
-                metrics = evaluate_split(loader, config, device, mode="jepa", jepa=belief_jepa, jepa_rgbd=jepa_rgbd)
+                metrics = evaluate_split(
+                    loader,
+                    config,
+                    device,
+                    mode="jepa",
+                    jepa=belief_jepa,
+                    jepa_rgbd=jepa_rgbd,
+                    jepa_ema_enabled=jepa_ema_enabled,
+                )
+                metrics["jepa_ema_enabled"] = float(jepa_ema_enabled)
                 row = {"split": split, "mode": "belief_jepa_latent_predictor", **metrics}
                 append_metrics(run_dir, row)
                 summary["splits"][f"jepa::{split}"] = metrics

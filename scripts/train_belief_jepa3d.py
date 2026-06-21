@@ -24,6 +24,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train Belief-JEPA 3D latent future/belief predictor.")
     parser.add_argument("--config", type=str, default="configs/belief3d_smoke.yaml")
     parser.add_argument("--rgbd", action="store_true", help="Use RGB-D context frames instead of RGB only.")
+    parser.add_argument("--no-ema", action="store_true", help="Use online target latents as a no-EMA ablation.")
     return parser.parse_args()
 
 
@@ -58,21 +59,50 @@ def build_model(config: Dict, device: torch.device, rgbd: bool) -> BeliefJEPA3D:
     ).to(device)
 
 
+def loss_weights(train_cfg: Dict) -> Dict[str, float]:
+    return {
+        "latent_weight": float(train_cfg.get("latent_weight", 1.0)),
+        "belief_weight": float(train_cfg.get("belief_weight", 0.5)),
+        "target_recon_weight": float(train_cfg.get("target_recon_weight", 0.1)),
+    }
+
+
+def scalar_losses(losses: Dict[str, torch.Tensor]) -> Dict[str, float]:
+    return {key: float(value.detach().cpu().item()) for key, value in losses.items()}
+
+
+def average_rows(rows: list[Dict[str, float]], prefix: str = "") -> Dict[str, float]:
+    if not rows:
+        return {}
+    keys = sorted({key for row in rows for key in row.keys()})
+    averages: Dict[str, float] = {}
+    for key in keys:
+        values = [row[key] for row in rows if key in row]
+        averages[f"{prefix}{key}"] = float(sum(values) / max(len(values), 1))
+    return averages
+
+
 @torch.no_grad()
-def evaluate_val(model: BeliefJEPA3D, loader: DataLoader, device: torch.device, rgbd: bool) -> Dict[str, float]:
+def evaluate_val(
+    model: BeliefJEPA3D,
+    loader: DataLoader,
+    device: torch.device,
+    rgbd: bool,
+    ema_enabled: bool,
+    train_cfg: Dict,
+) -> Dict[str, float]:
     model.eval()
     rows: list[Dict[str, float]] = []
     for batch in loader:
         frames = context_frames(batch, device, rgbd)
         future_state = batch["future_state"].to(device)
         future_mask = batch["future_mask"].to(device)
-        outputs = model(frames, future_state=future_state)
-        losses = belief_jepa_loss(outputs, future_state, future_mask)
-        rows.append({key: float(value.item()) for key, value in losses.items()})
-    if not rows:
-        return {}
-    keys = rows[0].keys()
-    return {f"val_{key}": float(sum(row[key] for row in rows) / len(rows)) for key in keys}
+        outputs = model(frames, future_state=future_state, use_ema_target=ema_enabled)
+        losses = belief_jepa_loss(outputs, future_state, future_mask, **loss_weights(train_cfg))
+        rows.append(scalar_losses(losses))
+    metrics = average_rows(rows, prefix="val_")
+    metrics["val_ema_online_drift"] = float(model.ema_online_drift().detach().cpu().item())
+    return metrics
 
 
 def main() -> None:
@@ -82,37 +112,62 @@ def main() -> None:
     device = get_device(config["project"].get("device", "auto"))
     data_cfg = config["data3d"]
     train_cfg = config["train_belief3d"]
+    ema_enabled = not bool(args.no_ema)
+    ema_decay = float(train_cfg.get("ema_decay", 0.99))
+    ema_update_after_step = int(train_cfg.get("ema_update_after_step", 0))
     manifest_dir = Path(data_cfg["manifest_dir"])
     batch_size = int(data_cfg.get("batch_size", config["eval"].get("batch_size", 8)))
 
     train_loader = make_loader(manifest_dir / "train.jsonl", data_cfg, batch_size=batch_size, shuffle=True)
     val_loader = make_loader(manifest_dir / "val.jsonl", data_cfg, batch_size=batch_size, shuffle=False)
     model = build_model(config, device, rgbd=args.rgbd)
-    optimizer = Adam(model.parameters(), lr=float(train_cfg["lr"]), weight_decay=float(train_cfg["weight_decay"]))
+    model.sync_ema_target_encoder()
+    optimizer = Adam(
+        [param for param in model.parameters() if param.requires_grad],
+        lr=float(train_cfg["lr"]),
+        weight_decay=float(train_cfg["weight_decay"]),
+    )
     epochs = int(train_cfg["epochs"])
     grad_clip = float(train_cfg["grad_clip"])
     run_name = "train_belief_jepa3d_rgbd" if args.rgbd else "train_belief_jepa3d"
+    if not ema_enabled:
+        run_name = f"{run_name}_noema"
     run_dir = init_run_dir(config["project"]["output_root"], run_name, config)
     best_metric = math.inf
     best_ckpt = run_dir / "checkpoints" / "best.pt"
+    global_step = 0
 
     for epoch in range(1, epochs + 1):
         model.train()
-        train_losses: list[float] = []
+        train_rows: list[Dict[str, float]] = []
         for batch in train_loader:
             frames = context_frames(batch, device, args.rgbd)
             future_state = batch["future_state"].to(device)
             future_mask = batch["future_mask"].to(device)
-            outputs = model(frames, future_state=future_state)
-            losses = belief_jepa_loss(outputs, future_state, future_mask)
+            outputs = model(frames, future_state=future_state, use_ema_target=ema_enabled)
+            losses = belief_jepa_loss(outputs, future_state, future_mask, **loss_weights(train_cfg))
             optimizer.zero_grad()
             losses["total"].backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
             optimizer.step()
-            train_losses.append(float(losses["total"].item()))
+            global_step += 1
+            if ema_enabled and global_step > ema_update_after_step:
+                model.update_ema_target_encoder(ema_decay)
+            batch_metrics = scalar_losses(losses)
+            batch_metrics["ema_online_drift"] = float(model.ema_online_drift().detach().cpu().item())
+            train_rows.append(batch_metrics)
 
-        val_metrics = evaluate_val(model, val_loader, device, args.rgbd)
-        row = {"epoch": epoch, "train_loss": float(sum(train_losses) / max(len(train_losses), 1)), **val_metrics}
+        val_metrics = evaluate_val(model, val_loader, device, args.rgbd, ema_enabled, train_cfg)
+        train_metrics = average_rows(train_rows)
+        row = {
+            "epoch": epoch,
+            "ema_enabled": float(ema_enabled),
+            "ema_decay": ema_decay,
+            "global_step": float(global_step),
+            "train_loss": train_metrics.get("total", math.nan),
+            **train_metrics,
+            **val_metrics,
+        }
         append_metrics(run_dir, row)
         print(row)
         metric = float(val_metrics.get("val_pos_rmse", math.inf))
@@ -126,6 +181,8 @@ def main() -> None:
                     "epoch": epoch,
                     "best_metric": best_metric,
                     "rgbd": bool(args.rgbd),
+                    "ema_enabled": bool(ema_enabled),
+                    "ema_decay": ema_decay,
                 },
             )
 
@@ -137,6 +194,9 @@ def main() -> None:
             "best_val_pos_rmse": best_metric,
             "device": str(device),
             "rgbd": bool(args.rgbd),
+            "ema_enabled": bool(ema_enabled),
+            "ema_decay": ema_decay,
+            "ema_update_after_step": ema_update_after_step,
         },
     )
     print(f"Done. Best checkpoint: {best_ckpt}")

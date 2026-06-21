@@ -65,6 +65,11 @@ train_belief3d:
   epochs: 10
   grad_clip: 1.0
   log_every: 20
+  ema_decay: 0.99
+  ema_update_after_step: 0
+  latent_weight: 1.0
+  belief_weight: 0.5
+  target_recon_weight: 0.1
 
 eval:
   batch_size: 16
