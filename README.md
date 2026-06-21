@@ -156,11 +156,13 @@ python scripts/train_belief3d.py --config configs/belief3d_large.yaml
 python scripts/evaluate_belief3d.py --config configs/belief3d_large.yaml --mode all
 ```
 
-Export a visual 3D belief demo with RGB frames, depth, projected particles, the true hidden trajectory, and per-frame belief metrics:
+Export a visual 3D belief demo with GIF/MP4/PNG assets plus JSON metrics for RGB frames, depth, projected particles, the true hidden trajectory, and per-frame distance, mass, surprise, entropy, and calibration:
 
 ```bash
 python scripts/export_belief3d_demo_assets.py --config configs/belief3d_smoke.yaml --seeds 2026 --scenario structured_occlusion --mode compare
 ```
+
+Use `--skip-mp4` on machines without an MP4 writer.
 
 Include learned image-to-belief and Belief-JEPA branches when checkpoints are available:
 

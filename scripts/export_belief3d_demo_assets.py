@@ -3,7 +3,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
 
@@ -71,6 +74,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mode", type=str, default="compare", choices=["constant", "geometry", "compare", "compare_all"])
     parser.add_argument("--encoder-ckpt", type=str, default=None, help="Optional image-to-belief checkpoint for compare_all.")
     parser.add_argument("--jepa-ckpt", type=str, default=None, help="Optional Belief-JEPA checkpoint for compare_all.")
+    parser.add_argument("--skip-mp4", action="store_true", help="Only write GIF/PNG/JSON artifacts.")
     return parser.parse_args()
 
 
@@ -349,7 +353,7 @@ def draw_metric_panel(
     metrics: Dict[str, List[float]],
     frame_idx: int,
     width: int,
-    height: int = 112,
+    height: int = 136,
     comparison: Dict[str, Dict[str, List[float]]] | None = None,
 ) -> np.ndarray:
     image = Image.new("RGB", (width, height), "white")
@@ -360,6 +364,8 @@ def draw_metric_panel(
         ("expected_distance", "dist", RGB_BLUE),
         ("mass_radius", "mass", RGB_GREEN),
         ("surprise", "surprise", RGB_MAGENTA),
+        ("entropy", "entropy", RGB_ORANGE),
+        ("coverage_90", "cov90", RGB_DARK),
     ]
     y = 8
     for key, label, color in names:
@@ -384,7 +390,7 @@ def draw_metric_panel(
             pts = [(float(x), float(yv)) for x, yv in zip(xs, ys) if np.isfinite(yv)]
             if len(pts) >= 2:
                 draw.line(pts, fill=color, width=2)
-        y += 22
+        y += 20
     if comparison:
         draw.text((width - 220, 8), "expected distance", fill=RGB_DARK, font=font)
         y_cmp = 22
@@ -423,6 +429,40 @@ def vstack(images: Iterable[np.ndarray]) -> np.ndarray:
     return np.asarray(out)
 
 
+def write_mp4(path: Path, frames: List[np.ndarray], fps: int) -> Optional[str]:
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is not None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            for frame_idx, frame in enumerate(frames):
+                Image.fromarray(frame).save(tmp_path / f"frame_{frame_idx:05d}.png")
+            command = [
+                ffmpeg,
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-framerate",
+                str(max(1, fps)),
+                "-i",
+                str(tmp_path / "frame_%05d.png"),
+                "-pix_fmt",
+                "yuv420p",
+                "-movflags",
+                "+faststart",
+                str(path),
+            ]
+            result = subprocess.run(command, capture_output=True, text=True, check=False)
+            if result.returncode == 0:
+                return None
+            return (result.stderr or result.stdout or f"ffmpeg exited with code {result.returncode}").strip()
+    try:
+        imageio.mimsave(path, frames, fps=max(1, fps), macro_block_size=1)
+    except Exception as exc:  # pragma: no cover - depends on optional ffmpeg backend.
+        return str(exc)
+    return None
+
+
 def choose_focus_object(future_state: np.ndarray, future_mask: np.ndarray) -> int:
     hidden = future_mask * (future_state[..., STATE_INDEX_3D["occluded"]] > 0.5).astype(np.float32)
     counts = hidden.sum(axis=0)
@@ -453,6 +493,7 @@ def per_frame_metrics(
     obj_idx: int,
     density_sigma: float,
     mass_radius: float,
+    credible_levels: Iterable[float] = (0.5, 0.7, 0.9),
 ) -> Dict[str, List[float]]:
     obj_particles = particles[:, obj_idx, :, 0:3]
     obj_weights = weights[:, obj_idx, :]
@@ -469,14 +510,30 @@ def per_frame_metrics(
     density = norm_const * np.sum(obj_weights * np.exp(-0.5 * (dist / density_sigma) ** 2), axis=-1)
     density_nll = -np.log(np.maximum(density, 1e-12))
     surprise = np.maximum(-np.log(np.maximum(mass, 1e-8)), 0.0)
-    return {
+    entropy = -np.sum(obj_weights * np.log(np.maximum(obj_weights, 1e-8)), axis=-1)
+    center_dist = np.sqrt(np.maximum(np.sum((obj_particles - belief_mean[:, None, :]) ** 2, axis=-1), 1e-12))
+    order = np.argsort(center_dist, axis=-1)
+    sorted_center_dist = np.take_along_axis(center_dist, order, axis=-1)
+    sorted_weights = np.take_along_axis(obj_weights, order, axis=-1)
+    cdf = np.cumsum(sorted_weights, axis=-1)
+
+    metrics = {
         "expected_distance": expected_distance.astype(float).tolist(),
         "mean_error": mean_error.astype(float).tolist(),
         "mass_radius": mass.astype(float).tolist(),
         "density_nll": density_nll.astype(float).tolist(),
         "surprise": surprise.astype(float).tolist(),
+        "entropy": entropy.astype(float).tolist(),
         "hidden": hidden.astype(bool).tolist(),
     }
+    for level in credible_levels:
+        idx = np.argmax(cdf >= float(level), axis=-1)
+        radius = sorted_center_dist[np.arange(sorted_center_dist.shape[0]), idx]
+        contained = (mean_error <= radius).astype(np.float32)
+        key = f"coverage_{int(round(float(level) * 100))}"
+        metrics[key] = contained.astype(float).tolist()
+        metrics[f"calibration_error_{int(round(float(level) * 100))}"] = np.abs(contained - float(level)).astype(float).tolist()
+    return metrics
 
 
 def visible_prefix_metrics(length: int) -> Dict[str, List[float]]:
@@ -486,6 +543,13 @@ def visible_prefix_metrics(length: int) -> Dict[str, List[float]]:
         "mass_radius": [float("nan")] * length,
         "density_nll": [float("nan")] * length,
         "surprise": [float("nan")] * length,
+        "entropy": [float("nan")] * length,
+        "coverage_50": [float("nan")] * length,
+        "coverage_70": [float("nan")] * length,
+        "coverage_90": [float("nan")] * length,
+        "calibration_error_50": [float("nan")] * length,
+        "calibration_error_70": [float("nan")] * length,
+        "calibration_error_90": [float("nan")] * length,
         "hidden": [False] * length,
     }
 
@@ -539,6 +603,7 @@ def build_demo_for_seed(
     belief_jepa_ckpt: Optional[str] = None,
     jepa_rgbd: bool = False,
     jepa_ema_enabled: bool = False,
+    write_video: bool = True,
 ) -> None:
     generator = SyntheticScene3DGenerator(scene_cfg)
     overrides = demo_overrides(scene_cfg, scenario)
@@ -578,6 +643,7 @@ def build_demo_for_seed(
             obj_idx=focus_obj,
             density_sigma=float(config["belief"]["density_sigma"]),
             mass_radius=float(config["belief"]["mass_radius"]),
+            credible_levels=config["belief"].get("credible_levels", [0.5, 0.7, 0.9]),
         )
         traces[method] = {
             "label": METHOD_LABELS[method],
@@ -711,6 +777,8 @@ def build_demo_for_seed(
     output_dir.mkdir(parents=True, exist_ok=True)
     gif_path = output_dir / f"seed_{seed}_belief3d.gif"
     imageio.mimsave(gif_path, frames, duration=1000.0 / max(1, fps))
+    mp4_path = output_dir / f"seed_{seed}_belief3d.mp4"
+    mp4_error = write_mp4(mp4_path, frames, fps=fps) if write_video else None
 
     preview_path = output_dir / f"seed_{seed}_belief3d_preview.png"
     Image.fromarray(frames[min(len(frames) - 1, max(0, len(frames) // 2))]).save(preview_path)
@@ -728,6 +796,10 @@ def build_demo_for_seed(
                 "available": False,
                 "checkpoint": checkpoint,
                 "mean_expected_distance": None,
+                "mean_surprise": None,
+                "mean_entropy": None,
+                "mean_coverage_90": None,
+                "mean_calibration_error_90": None,
                 "primary": False,
             }
             continue
@@ -737,6 +809,10 @@ def build_demo_for_seed(
             "available": True,
             "checkpoint": trace["checkpoint"],
             "mean_expected_distance": finite_mean(trace_metrics["expected_distance"]),
+            "mean_surprise": finite_mean(trace_metrics["surprise"]),
+            "mean_entropy": finite_mean(trace_metrics["entropy"]),
+            "mean_coverage_90": finite_mean(trace_metrics.get("coverage_90", [])),
+            "mean_calibration_error_90": finite_mean(trace_metrics.get("calibration_error_90", [])),
             "primary": method == primary_method,
         }
 
@@ -754,11 +830,20 @@ def build_demo_for_seed(
         "comparison_metrics": comparison,
         "method_metadata": method_metadata,
         "jepa_ema_enabled": bool(jepa_ema_enabled) if "jepa" in traces else None,
-        "artifacts": {"gif": str(gif_path), "preview": str(preview_path)},
+        "artifacts": {
+            "gif": str(gif_path),
+            "mp4": str(mp4_path) if write_video and mp4_error is None else None,
+            "mp4_error": mp4_error,
+            "preview": str(preview_path),
+        },
     }
     metrics_path = output_dir / f"seed_{seed}_belief3d_metrics.json"
     metrics_path.write_text(json.dumps(serializable, indent=2))
     print(f"Wrote {gif_path}")
+    if write_video and mp4_error is None:
+        print(f"Wrote {mp4_path}")
+    elif write_video:
+        print(f"Skipped MP4 export: {mp4_error}")
     print(f"Wrote {preview_path}")
     print(f"Wrote {metrics_path}")
 
@@ -807,6 +892,7 @@ def main() -> None:
             belief_jepa_ckpt=args.jepa_ckpt,
             jepa_rgbd=jepa_rgbd,
             jepa_ema_enabled=jepa_ema_enabled,
+            write_video=not bool(args.skip_mp4),
         )
 
 

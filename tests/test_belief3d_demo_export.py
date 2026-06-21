@@ -4,6 +4,7 @@ import json
 import math
 import tempfile
 import unittest
+import warnings
 from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
@@ -28,7 +29,8 @@ class Belief3DDemoExportTest(unittest.TestCase):
         config["belief"]["num_particles"] = 8
         scene_cfg = scene3d_config_from_data_cfg(config["data3d"])
         with tempfile.TemporaryDirectory() as tmpdir:
-            with redirect_stdout(StringIO()):
+            with warnings.catch_warnings(), redirect_stdout(StringIO()):
+                warnings.simplefilter("ignore")
                 build_demo_for_seed(
                     seed=2026,
                     config=config,
@@ -46,9 +48,19 @@ class Belief3DDemoExportTest(unittest.TestCase):
             self.assertIn(payload["primary_method"], {"constant", "geometry"})
             self.assertIn("constant", payload["comparison_metrics"])
             self.assertIn("geometry", payload["comparison_metrics"])
+            self.assertIn("entropy", payload["metrics"])
+            self.assertIn("coverage_90", payload["metrics"])
+            self.assertIn("calibration_error_90", payload["metrics"])
+            self.assertIn("mean_entropy", payload["method_metadata"]["constant"])
+            self.assertIn("mean_coverage_90", payload["method_metadata"]["constant"])
             self.assertFalse(payload["method_metadata"]["image"]["available"])
             self.assertFalse(payload["method_metadata"]["jepa"]["available"])
             self.assertTrue(Path(payload["artifacts"]["gif"]).exists())
+            if payload["artifacts"]["mp4"] is None:
+                self.assertIsInstance(payload["artifacts"]["mp4_error"], str)
+            else:
+                self.assertTrue(Path(payload["artifacts"]["mp4"]).exists())
+                self.assertIsNone(payload["artifacts"]["mp4_error"])
             self.assertTrue(Path(payload["artifacts"]["preview"]).exists())
 
 
