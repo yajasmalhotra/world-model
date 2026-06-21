@@ -150,7 +150,8 @@ def load_belief_jepa(config: Dict, device: torch.device, ckpt_path: str) -> tupl
         max_log_std=float(model_cfg.get("jepa_max_log_std", -0.8)),
     ).to(device)
     incompatible = model.load_state_dict(ckpt["model_state"], strict=False)
-    if any(key.startswith("ema_target_encoder.") for key in incompatible.missing_keys):
+    ema_prefixes = ("ema_target_encoder.", "ema_target_temporal.", "ema_target_temporal_proj.")
+    if any(key.startswith(ema_prefixes) for key in incompatible.missing_keys):
         model.sync_ema_target_encoder()
     model.eval()
     return model, rgbd, ema_enabled

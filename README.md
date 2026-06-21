@@ -130,7 +130,7 @@ python scripts/train_belief_jepa3d.py --config configs/belief3d_smoke.yaml --no-
 python scripts/train_belief_jepa3d.py --config configs/belief3d_smoke.yaml --sigreg-weight 0.0
 ```
 
-The JEPA run logs latent diagnostics including `latent_mse`, `target_recon_mse`, `pred_target_cosine`, `target_latent_std`, `pred_latent_std`, and `ema_online_drift`; evaluation adds `jepa_*` diagnostics while keeping predictions context-only. Belief-JEPA also includes a lightweight LeJEPA-inspired sketched Gaussian latent regularizer via `sigreg_weight`, `sigreg_sketches`, and `sigreg_scale`; set `sigreg_weight: 0.0` for ablation.
+The JEPA run logs latent diagnostics including `latent_mse`, `target_recon_mse`, `pred_target_cosine`, `target_latent_std`, `pred_latent_std`, and `ema_online_drift`; evaluation adds `jepa_*` diagnostics while keeping predictions context-only. The target branch encodes privileged future state with a trajectory-aware temporal encoder before the stop-gradient/EMA target loss. Belief-JEPA also includes a lightweight LeJEPA-inspired sketched Gaussian latent regularizer via `sigreg_weight`, `sigreg_sketches`, and `sigreg_scale`; set `sigreg_weight: 0.0` for ablation.
 
 Write an EMA/SIGReg ablation table from the latest JEPA checkpoints:
 

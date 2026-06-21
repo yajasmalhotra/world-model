@@ -21,6 +21,9 @@ from src.models.belief_jepa3d import BeliefJEPA3D, belief_jepa_loss
 from src.train.utils import append_metrics, get_device, init_run_dir, load_config, save_checkpoint, save_summary, set_seed
 
 
+TARGET_ENCODER_KIND = "bidirectional_temporal_state6_occ"
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train Belief-JEPA 3D latent future/belief predictor.")
     parser.add_argument("--config", type=str, default="configs/belief3d_smoke.yaml")
@@ -211,6 +214,7 @@ def main() -> None:
                     "sigreg_weight": float(loss_cfg["sigreg_weight"]),
                     "sigreg_sketches": int(loss_cfg["sigreg_sketches"]),
                     "sigreg_scale": float(loss_cfg["sigreg_scale"]),
+                    "target_encoder": TARGET_ENCODER_KIND,
                 },
             )
 
@@ -228,6 +232,7 @@ def main() -> None:
             "sigreg_weight": float(loss_cfg["sigreg_weight"]),
             "sigreg_sketches": int(loss_cfg["sigreg_sketches"]),
             "sigreg_scale": float(loss_cfg["sigreg_scale"]),
+            "target_encoder": TARGET_ENCODER_KIND,
         },
     )
     print(f"Done. Best checkpoint: {best_ckpt}")

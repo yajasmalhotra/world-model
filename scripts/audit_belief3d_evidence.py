@@ -384,6 +384,12 @@ def audit_jepa_ablation(ablation_json_path: Path) -> List[Check]:
             )
         )
 
+    target_encoders = {str(row.get("target_encoder", "legacy_per_state")) for row in rows}
+    if len(target_encoders) == 1:
+        checks.append(pass_check("jepa_ablation.target_encoder", f"All variants use {next(iter(target_encoders))}."))
+    else:
+        checks.append(fail_check("jepa_ablation.target_encoder", f"Mixed target encoders in ablation: {sorted(target_encoders)}."))
+
     required_metrics = {
         "target_hidden_expected_distance",
         "target_reappearance_surprise",

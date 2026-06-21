@@ -42,15 +42,17 @@ class BeliefJEPAEMATest(unittest.TestCase):
         losses = belief_jepa_loss(outputs, future_state, future_mask)
         losses["total"].backward()
 
-        self.assertFalse(any(param.grad is not None for param in model.ema_target_encoder.parameters()))
-        ema_before = [param.detach().clone() for param in model.ema_target_encoder.parameters()]
+        ema_params = [param for name, param in model.named_parameters() if name.startswith("ema_target")]
+        self.assertFalse(any(param.grad is not None for param in ema_params))
+        ema_before = [param.detach().clone() for param in ema_params]
 
         optimizer.step()
         drift_before_update = float(model.ema_online_drift())
         self.assertGreater(drift_before_update, 0.0)
 
         model.update_ema_target_encoder(decay=0.5)
-        changed = [not torch.allclose(before, after) for before, after in zip(ema_before, model.ema_target_encoder.parameters())]
+        ema_after = [param for name, param in model.named_parameters() if name.startswith("ema_target")]
+        changed = [not torch.allclose(before, after) for before, after in zip(ema_before, ema_after)]
         self.assertTrue(any(changed))
         self.assertLess(float(model.ema_online_drift()), drift_before_update)
 
@@ -75,6 +77,20 @@ class BeliefJEPAEMATest(unittest.TestCase):
         self.assertIn("latent_mse", diagnostics)
         self.assertIn("pred_target_cosine", diagnostics)
         self.assertTrue(torch.isfinite(diagnostics["latent_mse"]))
+
+    def test_target_encoder_uses_future_trajectory_context(self) -> None:
+        model = self._make_model()
+        model.sync_ema_target_encoder()
+        frames, future_state, _future_mask = self._make_batch()
+        alternate_future = future_state.clone()
+        alternate_future[:, 1:, :, 0:3] += 3.0
+        alternate_future[:, 0] = future_state[:, 0]
+
+        base = model(frames, future_state=future_state, use_ema_target=True)
+        changed = model(frames, future_state=alternate_future, use_ema_target=True)
+
+        self.assertTrue(torch.allclose(future_state[:, 0], alternate_future[:, 0]))
+        self.assertFalse(torch.allclose(base["target_latent"][:, 0], changed["target_latent"][:, 0]))
 
     def test_sigreg_is_finite_and_contributes_to_loss(self) -> None:
         model = self._make_model()

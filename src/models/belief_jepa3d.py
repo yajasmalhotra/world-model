@@ -62,7 +62,15 @@ class BeliefJEPA3D(nn.Module):
             nn.ReLU(),
             nn.Linear(latent_dim, latent_dim),
         )
+        self.target_temporal = nn.GRU(latent_dim, latent_dim, batch_first=True, bidirectional=True)
+        self.target_temporal_proj = nn.Sequential(
+            nn.Linear(2 * latent_dim, latent_dim),
+            nn.ReLU(),
+            nn.Linear(latent_dim, latent_dim),
+        )
         self.ema_target_encoder = copy.deepcopy(self.target_encoder)
+        self.ema_target_temporal = copy.deepcopy(self.target_temporal)
+        self.ema_target_temporal_proj = copy.deepcopy(self.target_temporal_proj)
         self.target_decoder = nn.Sequential(
             nn.Linear(latent_dim, latent_dim),
             nn.ReLU(),
@@ -70,29 +78,39 @@ class BeliefJEPA3D(nn.Module):
         )
         self._set_ema_requires_grad(False)
 
+    def _online_target_modules(self) -> tuple[nn.Module, nn.Module, nn.Module]:
+        return self.target_encoder, self.target_temporal, self.target_temporal_proj
+
+    def _ema_target_modules(self) -> tuple[nn.Module, nn.Module, nn.Module]:
+        return self.ema_target_encoder, self.ema_target_temporal, self.ema_target_temporal_proj
+
     def _set_ema_requires_grad(self, requires_grad: bool) -> None:
-        for param in self.ema_target_encoder.parameters():
-            param.requires_grad = requires_grad
+        for module in self._ema_target_modules():
+            for param in module.parameters():
+                param.requires_grad = requires_grad
 
     @torch.no_grad()
     def sync_ema_target_encoder(self) -> None:
-        self.ema_target_encoder.load_state_dict(self.target_encoder.state_dict())
+        for ema_module, online_module in zip(self._ema_target_modules(), self._online_target_modules()):
+            ema_module.load_state_dict(online_module.state_dict())
         self._set_ema_requires_grad(False)
 
     @torch.no_grad()
     def update_ema_target_encoder(self, decay: float) -> None:
         decay = float(decay)
-        for ema_param, online_param in zip(self.ema_target_encoder.parameters(), self.target_encoder.parameters()):
-            ema_param.mul_(decay).add_(online_param, alpha=1.0 - decay)
-        for ema_buffer, online_buffer in zip(self.ema_target_encoder.buffers(), self.target_encoder.buffers()):
-            ema_buffer.copy_(online_buffer)
+        for ema_module, online_module in zip(self._ema_target_modules(), self._online_target_modules()):
+            for ema_param, online_param in zip(ema_module.parameters(), online_module.parameters()):
+                ema_param.mul_(decay).add_(online_param, alpha=1.0 - decay)
+            for ema_buffer, online_buffer in zip(ema_module.buffers(), online_module.buffers()):
+                ema_buffer.copy_(online_buffer)
         self._set_ema_requires_grad(False)
 
     @torch.no_grad()
     def ema_online_drift(self) -> torch.Tensor:
         diffs = []
-        for ema_param, online_param in zip(self.ema_target_encoder.parameters(), self.target_encoder.parameters()):
-            diffs.append(torch.mean((ema_param - online_param) ** 2))
+        for ema_module, online_module in zip(self._ema_target_modules(), self._online_target_modules()):
+            for ema_param, online_param in zip(ema_module.parameters(), online_module.parameters()):
+                diffs.append(torch.mean((ema_param - online_param) ** 2))
         if not diffs:
             return torch.tensor(0.0)
         return torch.sqrt(torch.stack(diffs).mean())
@@ -108,6 +126,15 @@ class BeliefJEPA3D(nn.Module):
         target_dyn = future_state[:, :steps, :, 0:6]
         target_occ = future_state[:, :steps, :, 7:8]
         return torch.cat([target_dyn, target_occ], dim=-1)
+
+    def _encode_target(self, target_input: torch.Tensor, use_ema_target: bool) -> torch.Tensor:
+        encoder, temporal, temporal_proj = self._ema_target_modules() if use_ema_target else self._online_target_modules()
+        bsz, steps, objects, _features = target_input.shape
+        per_state = encoder(target_input)
+        sequence = per_state.permute(0, 2, 1, 3).reshape(bsz * objects, steps, self.latent_dim)
+        temporal_latent, _hidden = temporal(sequence)
+        target_latent = temporal_proj(temporal_latent)
+        return target_latent.reshape(bsz, objects, steps, self.latent_dim).permute(0, 2, 1, 3)
 
     def _pad_horizon(self, values: torch.Tensor, batch_size: int) -> torch.Tensor:
         if values.shape[1] >= self.horizon:
@@ -145,11 +172,10 @@ class BeliefJEPA3D(nn.Module):
             steps = min(self.horizon, future_state.shape[1])
             target_input = self._target_input(future_state, steps)
             with torch.no_grad():
-                target_encoder = self.ema_target_encoder if use_ema_target else self.target_encoder
-                target_latent = target_encoder(target_input)
+                target_latent = self._encode_target(target_input, use_ema_target=use_ema_target)
             out["target_latent"] = self._pad_horizon(target_latent, bsz).detach()
             if include_target_reconstruction:
-                online_target_latent = self.target_encoder(target_input)
+                online_target_latent = self._encode_target(target_input, use_ema_target=False)
                 target_reconstruction = self.target_decoder(online_target_latent)
                 out["target_input"] = self._pad_horizon(target_input, bsz)
                 out["online_target_latent"] = self._pad_horizon(online_target_latent, bsz)

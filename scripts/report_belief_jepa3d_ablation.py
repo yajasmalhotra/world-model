@@ -113,6 +113,7 @@ def checkpoint_metadata(name: str, path: Path, device: torch.device) -> Dict[str
         "sigreg_weight": numeric(sigreg_weight),
         "sigreg_sketches": numeric(sigreg_sketches),
         "sigreg_scale": numeric(sigreg_scale),
+        "target_encoder": ckpt.get("target_encoder", "legacy_per_state"),
         "epoch": ckpt.get("epoch"),
         "best_metric": numeric(ckpt.get("best_metric")),
     }
@@ -211,8 +212,8 @@ def markdown_report(rows: List[Dict[str, object]], claims: Dict[str, object]) ->
         "",
         "## Variants",
         "",
-        "| variant | EMA | SIGReg | RGB-D | checkpoint |",
-        "| --- | ---: | ---: | ---: | --- |",
+        "| variant | EMA | SIGReg | target encoder | RGB-D | checkpoint |",
+        "| --- | ---: | ---: | --- | ---: | --- |",
     ]
     seen = set()
     for row in rows:
@@ -227,6 +228,7 @@ def markdown_report(rows: List[Dict[str, object]], claims: Dict[str, object]) ->
                     variant,
                     str(bool(row.get("ema_enabled"))),
                     format_float(row.get("sigreg_weight")),
+                    str(row.get("target_encoder", "")),
                     str(bool(row.get("rgbd"))),
                     f"`{row.get('checkpoint')}`",
                 ]
