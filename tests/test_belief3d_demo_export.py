@@ -9,7 +9,13 @@ from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
 
-from scripts.export_belief3d_demo_assets import build_demo_for_seed, choose_primary_trace, finite_mean
+from scripts.export_belief3d_demo_assets import (
+    build_demo_for_seed,
+    choose_primary_trace,
+    combine_metrics,
+    finite_mean,
+    visible_prefix_metrics,
+)
 from src.data3d.dataset3d import scene3d_config_from_data_cfg
 from src.train.utils import get_device, load_config
 
@@ -23,6 +29,30 @@ class Belief3DDemoExportTest(unittest.TestCase):
         }
         self.assertAlmostEqual(finite_mean(comparison["constant"]["expected_distance"]), 0.75)
         self.assertEqual(choose_primary_trace(comparison), "geometry")
+
+    def test_impossible_reappearance_phase_is_labeled(self) -> None:
+        rollout = {
+            "expected_distance": [0.2, 0.3, 0.4],
+            "mean_error": [0.2, 0.3, 0.4],
+            "mass_radius": [0.8, 0.6, 0.2],
+            "density_nll": [1.0, 2.0, 3.0],
+            "surprise": [0.1, 0.5, 1.5],
+            "entropy": [2.0, 2.0, 2.0],
+            "coverage_50": [1.0, 1.0, 0.0],
+            "coverage_70": [1.0, 1.0, 0.0],
+            "coverage_90": [1.0, 1.0, 0.0],
+            "calibration_error_50": [0.5, 0.5, 0.5],
+            "calibration_error_70": [0.3, 0.3, 0.7],
+            "calibration_error_90": [0.1, 0.1, 0.9],
+            "hidden": [True, False, False],
+        }
+        metrics = combine_metrics(
+            visible_prefix_metrics(2),
+            rollout,
+            obs_len=2,
+            target_metadata={"is_impossible_event": True, "reappearance_frame": 3},
+        )
+        self.assertEqual(metrics["phase"][3], "impossible event")
 
     def test_compare_all_export_records_missing_learned_methods(self) -> None:
         config = load_config("configs/belief3d_smoke.yaml")

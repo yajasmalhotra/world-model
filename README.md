@@ -140,12 +140,6 @@ Write a compact benchmark report from the latest Belief3D evaluation run:
 python scripts/report_belief3d.py --output-dir results/belief3d_report
 ```
 
-Audit the current Belief3D evidence package against the research/demo requirements:
-
-```bash
-python scripts/audit_belief3d_evidence.py --output-dir results/belief3d_audit
-```
-
 For a more meaningful local MVP run:
 
 ```bash
@@ -174,6 +168,18 @@ Include learned image-to-belief and Belief-JEPA branches when checkpoints are av
 
 ```bash
 python scripts/export_belief3d_demo_assets.py --config configs/belief3d_smoke.yaml --seeds 2026 --scenario structured_occlusion --mode compare_all
+```
+
+Export an impossible-reappearance companion demo to exercise the impossible-event phase label:
+
+```bash
+python scripts/export_belief3d_demo_assets.py --config configs/belief3d_smoke.yaml --seeds 2026 --scenario impossible_reappearance --mode compare_all --output-dir results/belief3d_demo_impossible
+```
+
+Audit the current Belief3D evidence package against the research/demo requirements:
+
+```bash
+python scripts/audit_belief3d_evidence.py --output-dir results/belief3d_audit
 ```
 
 The 3D generator distinguishes visual occluders, physical obstacles, and solid screens. Targeted manifest rows store compact `target` metadata including `target_object_index`, `scenario`, `path_mode`, `occlusion_start`, `occlusion_end`, `reappearance_frame`, `hidden_frames`, `obstacle_ids`, `occluder_ids`, `collision_or_turn_frames`, `valid_route_id`, and `is_impossible_event`.

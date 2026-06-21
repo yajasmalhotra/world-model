@@ -71,6 +71,11 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Audit Belief-JEPA 3D evidence artifacts against the goal spec.")
     parser.add_argument("--config", type=str, default="configs/belief3d_smoke.yaml")
     parser.add_argument("--demo-json", type=str, default="results/belief3d_demo_compare_all/seed_2026_belief3d_metrics.json")
+    parser.add_argument(
+        "--impossible-demo-json",
+        type=str,
+        default="results/belief3d_demo_impossible/seed_2026_belief3d_metrics.json",
+    )
     parser.add_argument("--report-json", type=str, default="results/belief3d_report/belief3d_report.json")
     parser.add_argument("--output-dir", type=str, default="results/belief3d_audit")
     parser.add_argument("--sample-count", type=int, default=3, help="Targeted manifest rows to regenerate per split.")
@@ -224,66 +229,72 @@ def audit_manifests(config: Dict[str, Any], sample_count: int) -> List[Check]:
     return checks
 
 
-def audit_demo(demo_json_path: Path, base_dir: Path) -> List[Check]:
+def audit_demo(
+    demo_json_path: Path,
+    base_dir: Path,
+    prefix: str = "demo",
+    require_baseline_failure: bool = True,
+) -> List[Check]:
     checks: List[Check] = []
     if not demo_json_path.is_absolute():
         demo_json_path = base_dir / demo_json_path
     if not demo_json_path.exists():
-        return [fail_check("demo.json", f"Missing {demo_json_path}")]
+        return [fail_check(f"{prefix}.json", f"Missing {demo_json_path}")]
     demo = load_json(demo_json_path)
-    checks.append(pass_check("demo.json", f"Loaded {demo_json_path}."))
+    checks.append(pass_check(f"{prefix}.json", f"Loaded {demo_json_path}."))
 
     artifacts = demo.get("artifacts", {})
     for key in ("gif", "mp4", "preview"):
         path = resolve_artifact_path(artifacts.get(key), base_dir)
         if path is not None and path.exists() and path.stat().st_size > 0:
-            checks.append(pass_check(f"demo.artifact.{key}", f"{path} ({path.stat().st_size} bytes)."))
+            checks.append(pass_check(f"{prefix}.artifact.{key}", f"{path} ({path.stat().st_size} bytes)."))
         else:
-            checks.append(fail_check(f"demo.artifact.{key}", f"Missing or empty artifact for {key}: {artifacts.get(key)!r}"))
+            checks.append(fail_check(f"{prefix}.artifact.{key}", f"Missing or empty artifact for {key}: {artifacts.get(key)!r}"))
 
     methods = set((demo.get("comparison_metrics") or {}).keys())
     missing_methods = sorted(DEMO_METHODS - methods)
     if missing_methods:
-        checks.append(fail_check("demo.comparison_methods", f"Missing comparison methods: {missing_methods}"))
+        checks.append(fail_check(f"{prefix}.comparison_methods", f"Missing comparison methods: {missing_methods}"))
     else:
-        checks.append(pass_check("demo.comparison_methods", "Constant, geometry, image, and JEPA traces are present."))
+        checks.append(pass_check(f"{prefix}.comparison_methods", "Constant, geometry, image, and JEPA traces are present."))
 
     metrics = demo.get("metrics", {})
     missing_metrics = sorted(DEMO_METRICS - set(metrics.keys()))
     empty_metrics = sorted(key for key in DEMO_METRICS & set(metrics.keys()) if not finite_values(metrics.get(key, [])))
     if missing_metrics or empty_metrics:
-        checks.append(fail_check("demo.metrics", f"Missing={missing_metrics}; empty={empty_metrics}"))
+        checks.append(fail_check(f"{prefix}.metrics", f"Missing={missing_metrics}; empty={empty_metrics}"))
     else:
-        checks.append(pass_check("demo.metrics", "Distance, mass, surprise, entropy, and calibration series are finite."))
+        checks.append(pass_check(f"{prefix}.metrics", "Distance, mass, surprise, entropy, and calibration series are finite."))
 
     phases = [str(value) for value in metrics.get("phase", [])]
     required_phase_substrings = ["observed target", "belief initialized", "hidden rollout", "reappearance"]
     missing_phases = [phase for phase in required_phase_substrings if not any(phase in value for value in phases)]
     if missing_phases:
-        checks.append(fail_check("demo.phases", f"Missing phase labels containing: {missing_phases}"))
+        checks.append(fail_check(f"{prefix}.phases", f"Missing phase labels containing: {missing_phases}"))
     else:
-        checks.append(pass_check("demo.phases", "Observed, initialized, hidden rollout, and reappearance phases are labeled."))
+        checks.append(pass_check(f"{prefix}.phases", "Observed, initialized, hidden rollout, and reappearance phases are labeled."))
     if demo.get("scenario") == "impossible_reappearance":
         if any("impossible" in value for value in phases):
-            checks.append(pass_check("demo.impossible_phase", "Impossible-event phase is labeled."))
+            checks.append(pass_check(f"{prefix}.impossible_phase", "Impossible-event phase is labeled."))
         else:
-            checks.append(fail_check("demo.impossible_phase", "Impossible scenario lacks an impossible-event phase label."))
+            checks.append(fail_check(f"{prefix}.impossible_phase", "Impossible scenario lacks an impossible-event phase label."))
 
-    metadata = demo.get("method_metadata", {})
-    constant = metadata.get("constant", {})
-    constant_distance = constant.get("mean_expected_distance")
-    stronger = [
-        method
-        for method, row in metadata.items()
-        if method != "constant"
-        and is_finite_number(row.get("mean_expected_distance"))
-        and is_finite_number(constant_distance)
-        and float(row["mean_expected_distance"]) < float(constant_distance)
-    ]
-    if stronger:
-        checks.append(pass_check("demo.visible_baseline_failure", f"Methods beating constant baseline: {stronger}."))
-    else:
-        checks.append(fail_check("demo.visible_baseline_failure", "No available method beats constant expected distance."))
+    if require_baseline_failure:
+        metadata = demo.get("method_metadata", {})
+        constant = metadata.get("constant", {})
+        constant_distance = constant.get("mean_expected_distance")
+        stronger = [
+            method
+            for method, row in metadata.items()
+            if method != "constant"
+            and is_finite_number(row.get("mean_expected_distance"))
+            and is_finite_number(constant_distance)
+            and float(row["mean_expected_distance"]) < float(constant_distance)
+        ]
+        if stronger:
+            checks.append(pass_check(f"{prefix}.visible_baseline_failure", f"Methods beating constant baseline: {stronger}."))
+        else:
+            checks.append(fail_check(f"{prefix}.visible_baseline_failure", "No available method beats constant expected distance."))
     return checks
 
 
@@ -379,7 +390,15 @@ def main() -> None:
     config = load_config(args.config)
     checks: List[Check] = []
     checks.extend(audit_manifests(config, sample_count=int(args.sample_count)))
-    checks.extend(audit_demo(Path(args.demo_json), base_dir=ROOT))
+    checks.extend(audit_demo(Path(args.demo_json), base_dir=ROOT, prefix="demo"))
+    checks.extend(
+        audit_demo(
+            Path(args.impossible_demo_json),
+            base_dir=ROOT,
+            prefix="impossible_demo",
+            require_baseline_failure=False,
+        )
+    )
     checks.extend(audit_report(Path(args.report_json)))
     summary = summarize_checks(checks)
     artifacts = write_outputs(summary, Path(args.output_dir))

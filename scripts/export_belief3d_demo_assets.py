@@ -554,13 +554,24 @@ def visible_prefix_metrics(length: int) -> Dict[str, List[float]]:
     }
 
 
-def combine_metrics(prefix: Dict[str, List[float]], rollout: Dict[str, List[float]], obs_len: int) -> Dict[str, List[float]]:
+def combine_metrics(
+    prefix: Dict[str, List[float]],
+    rollout: Dict[str, List[float]],
+    obs_len: int,
+    target_metadata: Dict[str, object] | None = None,
+) -> Dict[str, List[float]]:
     combined: Dict[str, List[float]] = {}
     for key in prefix.keys():
         combined[key] = prefix[key] + rollout[key]
     phases = ["observed target"] * max(0, obs_len - 1) + ["belief initialized"]
-    for hidden in rollout["hidden"]:
-        phases.append("hidden rollout" if hidden else "reappearance / visible")
+    impossible = bool((target_metadata or {}).get("is_impossible_event"))
+    reappearance_frame = (target_metadata or {}).get("reappearance_frame")
+    for offset, hidden in enumerate(rollout["hidden"]):
+        frame_idx = obs_len + offset
+        if impossible and isinstance(reappearance_frame, int) and frame_idx == reappearance_frame:
+            phases.append("impossible event")
+        else:
+            phases.append("hidden rollout" if hidden else "reappearance / visible")
     combined["phase"] = phases
     return combined
 
@@ -650,7 +661,12 @@ def build_demo_for_seed(
             "checkpoint": checkpoint,
             "particles": particles,
             "weights": weights,
-            "metrics": combine_metrics(visible_prefix_metrics(obs_len), rollout_metrics, obs_len=obs_len),
+            "metrics": combine_metrics(
+                visible_prefix_metrics(obs_len),
+                rollout_metrics,
+                obs_len=obs_len,
+                target_metadata=target_metadata,
+            ),
         }
 
     add_trace("constant", constant_particles_np, constant_weights_np)
