@@ -18,7 +18,7 @@ if str(ROOT) not in sys.path:
 
 from src.data3d.dataset3d import scene3d_config_from_data_cfg
 from src.data3d.scene_generator3d import STATE_INDEX_3D, Scene3DConfig, SyntheticScene3DGenerator
-from src.models.belief_state import ParticleBeliefConfig, rollout_particle_belief
+from src.models.belief_state import ParticleBeliefConfig, initialize_particles, rollout_particle_belief
 from src.train.utils import get_device, load_config, set_seed
 
 
@@ -29,6 +29,7 @@ RGB_BLUE = (59, 130, 246)
 RGB_DARK = (17, 24, 39)
 RGB_PANEL = (248, 250, 252)
 RGB_GRID = (203, 213, 225)
+RGB_ORANGE = (249, 115, 22)
 
 
 def parse_args() -> argparse.Namespace:
@@ -84,23 +85,25 @@ def draw_camera_belief_overlay(
     true_pos: np.ndarray,
     hidden: bool,
     max_particles: int,
+    show_particles: bool = True,
 ) -> np.ndarray:
     base = Image.fromarray(rgb).convert("RGBA")
     overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
 
-    if particles.shape[0] > max_particles:
-        # Deterministic stride keeps GIFs stable from run to run.
-        stride = max(1, particles.shape[0] // max_particles)
-        particles = particles[::stride][:max_particles]
+    if show_particles:
+        if particles.shape[0] > max_particles:
+            # Deterministic stride keeps GIFs stable from run to run.
+            stride = max(1, particles.shape[0] // max_particles)
+            particles = particles[::stride][:max_particles]
 
-    px, py, depth = project_points(particles[:, 0:3], cfg)
-    order = np.argsort(depth)[::-1]
-    for idx in order:
-        x = float(px[idx])
-        y = float(py[idx])
-        if 0 <= x < cfg.image_size and 0 <= y < cfg.image_size:
-            draw.ellipse([x - 1.2, y - 1.2, x + 1.2, y + 1.2], fill=(*RGB_YELLOW, 42))
+        px, py, depth = project_points(particles[:, 0:3], cfg)
+        order = np.argsort(depth)[::-1]
+        for idx in order:
+            x = float(px[idx])
+            y = float(py[idx])
+            if 0 <= x < cfg.image_size and 0 <= y < cfg.image_size:
+                draw.ellipse([x - 1.2, y - 1.2, x + 1.2, y + 1.2], fill=(*RGB_YELLOW, 42))
 
     tx, ty, _ = project_points(true_pos.reshape(1, 3), cfg)
     x = float(tx[0])
@@ -140,6 +143,7 @@ def draw_3d_belief_panel(
     current_true: np.ndarray,
     hidden: bool,
     max_particles: int,
+    show_particles: bool = True,
 ) -> np.ndarray:
     size = cfg.image_size
     image = Image.new("RGB", (size, size), RGB_PANEL)
@@ -163,16 +167,17 @@ def draw_3d_belief_panel(
     for a, b in edges:
         draw.line([tuple(projected[a]), tuple(projected[b])], fill=RGB_GRID, width=1)
 
-    if particles.shape[0] > max_particles:
-        stride = max(1, particles.shape[0] // max_particles)
-        particles = particles[::stride][:max_particles]
-    p2 = iso_project(particles[:, 0:3], cfg, size)
-    z_norm = (particles[:, 2] - cfg.world_min) / max(cfg.world_max - cfg.world_min, 1e-6)
-    for point, zn in zip(p2, z_norm):
-        x, y = point.tolist()
-        if -4 <= x <= size + 4 and -4 <= y <= size + 4:
-            shade = int(120 + 100 * float(np.clip(zn, 0.0, 1.0)))
-            draw.ellipse([x - 1.2, y - 1.2, x + 1.2, y + 1.2], fill=(shade, 145, 28))
+    if show_particles:
+        if particles.shape[0] > max_particles:
+            stride = max(1, particles.shape[0] // max_particles)
+            particles = particles[::stride][:max_particles]
+        p2 = iso_project(particles[:, 0:3], cfg, size)
+        z_norm = (particles[:, 2] - cfg.world_min) / max(cfg.world_max - cfg.world_min, 1e-6)
+        for point, zn in zip(p2, z_norm):
+            x, y = point.tolist()
+            if -4 <= x <= size + 4 and -4 <= y <= size + 4:
+                shade = int(120 + 100 * float(np.clip(zn, 0.0, 1.0)))
+                draw.ellipse([x - 1.2, y - 1.2, x + 1.2, y + 1.2], fill=(shade, 145, 28))
 
     if true_history.shape[0] >= 2:
         draw_polyline(draw, iso_project(true_history, cfg, size), fill=RGB_BLUE, width=2)
@@ -185,7 +190,7 @@ def draw_3d_belief_panel(
     return np.asarray(image)
 
 
-def draw_metric_panel(metrics: Dict[str, List[float]], frame_idx: int, width: int, height: int = 76) -> np.ndarray:
+def draw_metric_panel(metrics: Dict[str, List[float]], frame_idx: int, width: int, height: int = 96) -> np.ndarray:
     image = Image.new("RGB", (width, height), "white")
     draw = ImageDraw.Draw(image)
     font = ImageFont.load_default()
@@ -218,6 +223,8 @@ def draw_metric_panel(metrics: Dict[str, List[float]], frame_idx: int, width: in
             if len(pts) >= 2:
                 draw.line(pts, fill=color, width=2)
         y += 22
+    phase = metrics["phase"][frame_idx]
+    draw.text((8, height - 18), f"phase: {phase}", fill=RGB_ORANGE if phase == "hidden rollout" else RGB_DARK, font=font)
     return np.asarray(image)
 
 
@@ -296,6 +303,28 @@ def per_frame_metrics(
     }
 
 
+def visible_prefix_metrics(length: int) -> Dict[str, List[float]]:
+    return {
+        "expected_distance": [float("nan")] * length,
+        "mean_error": [float("nan")] * length,
+        "mass_radius": [float("nan")] * length,
+        "density_nll": [float("nan")] * length,
+        "surprise": [float("nan")] * length,
+        "hidden": [False] * length,
+    }
+
+
+def combine_metrics(prefix: Dict[str, List[float]], rollout: Dict[str, List[float]], obs_len: int) -> Dict[str, List[float]]:
+    combined: Dict[str, List[float]] = {}
+    for key in prefix.keys():
+        combined[key] = prefix[key] + rollout[key]
+    phases = ["observed target"] * max(0, obs_len - 1) + ["belief initialized"]
+    for hidden in rollout["hidden"]:
+        phases.append("hidden rollout" if hidden else "reappearance / visible")
+    combined["phase"] = phases
+    return combined
+
+
 def build_demo_for_seed(
     seed: int,
     config: Dict,
@@ -321,11 +350,13 @@ def build_demo_for_seed(
     init_state = torch.from_numpy(sample["state"][obs_len - 1 : obs_len]).to(device)
     object_mask = torch.from_numpy(sample["object_mask"][obs_len - 1 : obs_len]).to(device)
     particle_cfg = ParticleBeliefConfig.from_config(config["belief"], sample["metadata"]["config"])
+    init_particles, _init_weights = initialize_particles(init_state, object_mask, particle_cfg)
     particles, weights = rollout_particle_belief(init_state, object_mask, horizon=horizon, cfg=particle_cfg)
+    init_particles_np = init_particles.squeeze(0).detach().cpu().numpy()
     particles_np = particles.squeeze(0).detach().cpu().numpy()
     weights_np = weights.squeeze(0).detach().cpu().numpy()
 
-    metrics = per_frame_metrics(
+    rollout_metrics = per_frame_metrics(
         particles=particles_np,
         weights=weights_np,
         true_state=future_state,
@@ -333,35 +364,49 @@ def build_demo_for_seed(
         density_sigma=float(config["belief"]["density_sigma"]),
         mass_radius=float(config["belief"]["mass_radius"]),
     )
+    metrics = combine_metrics(visible_prefix_metrics(obs_len), rollout_metrics, obs_len=obs_len)
 
     frames: List[np.ndarray] = []
-    true_history = sample["state"][:obs_len, focus_obj, 0:3].copy()
-    for t in range(horizon):
-        current_true = future_state[t, focus_obj, 0:3]
-        history = np.concatenate([true_history, future_state[: t + 1, focus_obj, 0:3]], axis=0)
-        hidden = bool(metrics["hidden"][t])
-        rgb_panel = make_panel(sample["frames"][obs_len + t], "RGB camera", panel_scale)
-        depth_panel = make_panel(depth_to_rgb(sample["depth"][obs_len + t]), "Depth", panel_scale)
+    total_steps = obs_len + horizon
+    empty_particles = np.zeros((0, 6), dtype=np.float32)
+    for frame_idx in range(total_steps):
+        current_true = sample["state"][frame_idx, focus_obj, 0:3]
+        history = sample["state"][: frame_idx + 1, focus_obj, 0:3]
+        hidden = bool(sample["state"][frame_idx, focus_obj, STATE_INDEX_3D["occluded"]] > 0.5)
+        if frame_idx < obs_len - 1:
+            particle_cloud = empty_particles
+            show_particles = False
+        elif frame_idx == obs_len - 1:
+            particle_cloud = init_particles_np[focus_obj]
+            show_particles = True
+        else:
+            particle_cloud = particles_np[frame_idx - obs_len, focus_obj]
+            show_particles = True
+
+        rgb_panel = make_panel(sample["frames"][frame_idx], "RGB camera", panel_scale)
+        depth_panel = make_panel(depth_to_rgb(sample["depth"][frame_idx]), "Depth", panel_scale)
         overlay = draw_camera_belief_overlay(
-            rgb=sample["frames"][obs_len + t],
+            rgb=sample["frames"][frame_idx],
             cfg=effective_cfg,
-            particles=particles_np[t, focus_obj],
+            particles=particle_cloud,
             true_pos=current_true,
             hidden=hidden,
             max_particles=max_particles,
+            show_particles=show_particles,
         )
         overlay_panel = make_panel(overlay, "Belief particles + truth", panel_scale)
         world = draw_3d_belief_panel(
             cfg=effective_cfg,
-            particles=particles_np[t, focus_obj],
+            particles=particle_cloud,
             true_history=history,
             current_true=current_true,
             hidden=hidden,
             max_particles=max_particles,
+            show_particles=show_particles,
         )
         world_panel = make_panel(world, "3D belief / trajectory", panel_scale)
         top = hstack_with_border([rgb_panel, depth_panel, overlay_panel, world_panel])
-        metrics_panel = draw_metric_panel(metrics, t, width=top.shape[1])
+        metrics_panel = draw_metric_panel(metrics, frame_idx, width=top.shape[1])
         frames.append(vstack([top, metrics_panel]))
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -378,6 +423,7 @@ def build_demo_for_seed(
         "scenario": sample["metadata"]["scenario"],
         "obs_len": obs_len,
         "horizon": horizon,
+        "total_frames": total_steps,
         "target": target_metadata,
         "metrics": metrics,
         "artifacts": {"gif": str(gif_path), "preview": str(preview_path)},
