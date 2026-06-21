@@ -4,7 +4,7 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Iterable, Optional
 
 import torch
 from torch.utils.data import DataLoader
@@ -55,12 +55,18 @@ def latest_checkpoint(pattern: str) -> Optional[str]:
     return str(candidates[-1])
 
 
-def latest_jepa_checkpoint() -> Optional[str]:
-    candidates = sorted(Path("runs").glob("*_train_belief_jepa3d*/checkpoints/best.pt"))
+def select_preferred_jepa_checkpoint(candidates: Iterable[Path]) -> Optional[Path]:
+    candidates = sorted(candidates)
     if not candidates:
         return None
+    ema_sigreg_candidates = [path for path in candidates if "noema" not in str(path) and "nosigreg" not in str(path)]
     ema_candidates = [path for path in candidates if "noema" not in str(path)]
-    return str((ema_candidates or candidates)[-1])
+    return (ema_sigreg_candidates or ema_candidates or candidates)[-1]
+
+
+def latest_jepa_checkpoint() -> Optional[str]:
+    preferred = select_preferred_jepa_checkpoint(Path("runs").glob("*_train_belief_jepa3d*/checkpoints/best.pt"))
+    return str(preferred) if preferred is not None else None
 
 
 def load_image_encoder(config: Dict, device: torch.device, ckpt_path: Optional[str]) -> tuple[ImageToBeliefEncoder3D, bool]:

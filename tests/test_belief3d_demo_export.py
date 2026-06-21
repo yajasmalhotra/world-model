@@ -11,9 +11,11 @@ from pathlib import Path
 
 from scripts.export_belief3d_demo_assets import (
     build_demo_for_seed,
+    choose_demo_primary_method,
     choose_primary_trace,
     combine_metrics,
     finite_mean,
+    select_preferred_jepa_checkpoint,
     visible_prefix_metrics,
 )
 from src.data3d.dataset3d import scene3d_config_from_data_cfg
@@ -29,6 +31,26 @@ class Belief3DDemoExportTest(unittest.TestCase):
         }
         self.assertAlmostEqual(finite_mean(comparison["constant"]["expected_distance"]), 0.75)
         self.assertEqual(choose_primary_trace(comparison), "geometry")
+
+    def test_choose_demo_primary_method_honors_explicit_available_method(self) -> None:
+        traces = {"constant": {}, "geometry": {}, "jepa": {}}
+        comparison = {
+            "constant": {"expected_distance": [0.7]},
+            "geometry": {"expected_distance": [0.2]},
+            "jepa": {"expected_distance": [0.5]},
+        }
+        self.assertEqual(choose_demo_primary_method("compare_all", traces, comparison, requested="jepa"), "jepa")
+        self.assertEqual(choose_demo_primary_method("compare_all", traces, comparison, requested="auto"), "geometry")
+        with self.assertRaisesRegex(RuntimeError, "unavailable"):
+            choose_demo_primary_method("compare_all", traces, comparison, requested="image")
+
+    def test_jepa_checkpoint_selection_prefers_ema_sigreg(self) -> None:
+        candidates = [
+            Path("runs/20260101_train_belief_jepa3d_noema/checkpoints/best.pt"),
+            Path("runs/20260102_train_belief_jepa3d/checkpoints/best.pt"),
+            Path("runs/20260103_train_belief_jepa3d_nosigreg/checkpoints/best.pt"),
+        ]
+        self.assertEqual(select_preferred_jepa_checkpoint(candidates), candidates[1])
 
     def test_impossible_reappearance_phase_is_labeled(self) -> None:
         rollout = {
@@ -76,6 +98,7 @@ class Belief3DDemoExportTest(unittest.TestCase):
             metrics_path = Path(tmpdir) / "seed_2026_belief3d_metrics.json"
             payload = json.loads(metrics_path.read_text())
             self.assertIn(payload["primary_method"], {"constant", "geometry"})
+            self.assertEqual(payload["primary_method_requested"], "auto")
             self.assertIn("constant", payload["comparison_metrics"])
             self.assertIn("geometry", payload["comparison_metrics"])
             self.assertIn("entropy", payload["metrics"])

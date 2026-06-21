@@ -183,6 +183,12 @@ Include learned image-to-belief and Belief-JEPA branches when checkpoints are av
 python scripts/export_belief3d_demo_assets.py --config configs/belief3d_smoke.yaml --seeds 2026 --scenario structured_occlusion --mode compare_all
 ```
 
+Render the comparison chart while putting the learned JEPA trace in the main belief panels:
+
+```bash
+python scripts/export_belief3d_demo_assets.py --config configs/belief3d_smoke.yaml --seeds 2026 --scenario structured_occlusion --mode compare_all --primary-method jepa --output-dir results/belief3d_demo_jepa
+```
+
 Export an impossible-reappearance companion demo to exercise the impossible-event phase label:
 
 ```bash

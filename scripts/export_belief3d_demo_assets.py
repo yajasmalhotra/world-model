@@ -72,6 +72,13 @@ def parse_args() -> argparse.Namespace:
         choices=["random", "targeted_occlusion", "structured_occlusion", "impossible_reappearance"],
     )
     parser.add_argument("--mode", type=str, default="compare", choices=["constant", "geometry", "compare", "compare_all"])
+    parser.add_argument(
+        "--primary-method",
+        type=str,
+        default="auto",
+        choices=["auto", "constant", "geometry", "image", "jepa"],
+        help="Which belief trace to render in the main panels. 'auto' picks the lowest finite expected distance.",
+    )
     parser.add_argument("--encoder-ckpt", type=str, default=None, help="Optional image-to-belief checkpoint for compare_all.")
     parser.add_argument("--jepa-ckpt", type=str, default=None, help="Optional Belief-JEPA checkpoint for compare_all.")
     parser.add_argument("--skip-mp4", action="store_true", help="Only write GIF/PNG/JSON artifacts.")
@@ -85,12 +92,18 @@ def latest_checkpoint(pattern: str) -> Optional[str]:
     return str(candidates[-1])
 
 
-def latest_jepa_checkpoint() -> Optional[str]:
-    candidates = sorted(Path("runs").glob("*_train_belief_jepa3d*/checkpoints/best.pt"))
+def select_preferred_jepa_checkpoint(candidates: Iterable[Path]) -> Optional[Path]:
+    candidates = sorted(candidates)
     if not candidates:
         return None
+    ema_sigreg_candidates = [path for path in candidates if "noema" not in str(path) and "nosigreg" not in str(path)]
     ema_candidates = [path for path in candidates if "noema" not in str(path)]
-    return str((ema_candidates or candidates)[-1])
+    return (ema_sigreg_candidates or ema_candidates or candidates)[-1]
+
+
+def latest_jepa_checkpoint() -> Optional[str]:
+    preferred = select_preferred_jepa_checkpoint(Path("runs").glob("*_train_belief_jepa3d*/checkpoints/best.pt"))
+    return str(preferred) if preferred is not None else None
 
 
 def load_image_encoder(config: Dict, device: torch.device, ckpt_path: str) -> tuple[ImageToBeliefEncoder3D, bool]:
@@ -599,6 +612,26 @@ def choose_primary_trace(comparison: Dict[str, Dict[str, List[float]]], fallback
     return next(iter(comparison.keys()))
 
 
+def choose_demo_primary_method(
+    mode: str,
+    traces: Dict[str, Dict[str, object]],
+    comparison: Optional[Dict[str, Dict[str, List[float]]]],
+    requested: str = "auto",
+) -> str:
+    if requested != "auto":
+        if requested not in traces:
+            available = ", ".join(sorted(traces.keys()))
+            raise RuntimeError(f"Requested primary method {requested!r} is unavailable. Available methods: {available}")
+        return requested
+    if mode == "constant":
+        return "constant"
+    if mode == "geometry":
+        return "geometry"
+    if mode == "compare_all":
+        return choose_primary_trace(comparison or {}, fallback="geometry")
+    return "geometry"
+
+
 def build_demo_for_seed(
     seed: int,
     config: Dict,
@@ -617,6 +650,7 @@ def build_demo_for_seed(
     belief_jepa_ckpt: Optional[str] = None,
     jepa_rgbd: bool = False,
     jepa_ema_enabled: bool = False,
+    primary_method_override: str = "auto",
     write_video: bool = True,
 ) -> None:
     generator = SyntheticScene3DGenerator(scene_cfg)
@@ -721,14 +755,7 @@ def build_demo_for_seed(
     if mode in ("compare", "compare_all"):
         comparison = {method: trace["metrics"] for method, trace in traces.items()}
 
-    if mode == "constant":
-        primary_method = "constant"
-    elif mode == "geometry":
-        primary_method = "geometry"
-    elif mode == "compare_all":
-        primary_method = choose_primary_trace(comparison or {}, fallback="geometry")
-    else:
-        primary_method = "geometry"
+    primary_method = choose_demo_primary_method(mode, traces, comparison, requested=primary_method_override)
     particles_np = traces[primary_method]["particles"]
     weights_np = traces[primary_method]["weights"]
     metrics = traces[primary_method]["metrics"]
@@ -850,6 +877,7 @@ def build_demo_for_seed(
         "focus_object": focus_obj,
         "mode": mode_label,
         "primary_method": primary_method,
+        "primary_method_requested": primary_method_override,
         "scenario": sample["metadata"]["scenario"],
         "obs_len": obs_len,
         "horizon": horizon,
@@ -926,6 +954,7 @@ def main() -> None:
             belief_jepa_ckpt=args.jepa_ckpt,
             jepa_rgbd=jepa_rgbd,
             jepa_ema_enabled=jepa_ema_enabled,
+            primary_method_override=args.primary_method,
             write_video=not bool(args.skip_mp4),
         )
 
