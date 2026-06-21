@@ -44,6 +44,7 @@ def main() -> None:
     seq_len = int(data_cfg["seq_len"])
     obs_len = int(data_cfg["obs_len"])
     velocity_scale = float(data_cfg["velocity_scale"])
+    targeted_seq_len = max(seq_len, obs_len + 14, 24)
 
     specs = [
         ManifestSpec("train", 10_000_000, train_count, tags=["train"], overrides={}),
@@ -69,6 +70,17 @@ def main() -> None:
             test_count,
             tags=["test", "unseen_occluders"],
             overrides={"occluder_layout": "edge_bias"},
+        ),
+        ManifestSpec(
+            "test_targeted_occlusion",
+            16_000_000,
+            test_count,
+            tags=["test", "targeted_occlusion"],
+            overrides={
+                "scenario": "targeted_occlusion",
+                "seq_len": targeted_seq_len,
+                "obs_len": obs_len,
+            },
         ),
     ]
 

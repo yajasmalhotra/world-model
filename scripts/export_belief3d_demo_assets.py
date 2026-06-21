@@ -39,6 +39,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fps", type=int, default=6)
     parser.add_argument("--max-particles", type=int, default=192)
     parser.add_argument("--panel-scale", type=int, default=2)
+    parser.add_argument("--scenario", type=str, default="targeted_occlusion", choices=["random", "targeted_occlusion"])
     parser.add_argument("--mode", type=str, default="physics", choices=["physics"])
     return parser.parse_args()
 
@@ -252,6 +253,16 @@ def choose_focus_object(future_state: np.ndarray, future_mask: np.ndarray) -> in
     return int(np.argmax(visible_counts))
 
 
+def demo_overrides(scene_cfg: Scene3DConfig, scenario: str) -> Dict[str, object]:
+    if scenario != "targeted_occlusion":
+        return {"scenario": "random"}
+    return {
+        "scenario": "targeted_occlusion",
+        "seq_len": max(scene_cfg.seq_len, scene_cfg.obs_len + 14, 24),
+        "obs_len": scene_cfg.obs_len,
+    }
+
+
 def per_frame_metrics(
     particles: np.ndarray,
     weights: np.ndarray,
@@ -294,18 +305,22 @@ def build_demo_for_seed(
     fps: int,
     max_particles: int,
     panel_scale: int,
+    scenario: str,
 ) -> None:
     generator = SyntheticScene3DGenerator(scene_cfg)
-    sample = generator.generate(seed=seed)
-    obs_len = scene_cfg.obs_len
+    overrides = demo_overrides(scene_cfg, scenario)
+    effective_cfg = generator.resolve_config(overrides)
+    sample = generator.generate(seed=seed, overrides=overrides, tags=["demo", scenario])
+    obs_len = effective_cfg.obs_len
     future_state = sample["state"][obs_len:]
     future_mask = sample["object_mask"][obs_len:]
     horizon = future_state.shape[0]
-    focus_obj = choose_focus_object(future_state, future_mask)
+    target_metadata = sample["metadata"].get("target", {})
+    focus_obj = int(target_metadata.get("object_index", choose_focus_object(future_state, future_mask)))
 
     init_state = torch.from_numpy(sample["state"][obs_len - 1 : obs_len]).to(device)
     object_mask = torch.from_numpy(sample["object_mask"][obs_len - 1 : obs_len]).to(device)
-    particle_cfg = ParticleBeliefConfig.from_config(config["belief"], config["data3d"])
+    particle_cfg = ParticleBeliefConfig.from_config(config["belief"], sample["metadata"]["config"])
     particles, weights = rollout_particle_belief(init_state, object_mask, horizon=horizon, cfg=particle_cfg)
     particles_np = particles.squeeze(0).detach().cpu().numpy()
     weights_np = weights.squeeze(0).detach().cpu().numpy()
@@ -329,7 +344,7 @@ def build_demo_for_seed(
         depth_panel = make_panel(depth_to_rgb(sample["depth"][obs_len + t]), "Depth", panel_scale)
         overlay = draw_camera_belief_overlay(
             rgb=sample["frames"][obs_len + t],
-            cfg=scene_cfg,
+            cfg=effective_cfg,
             particles=particles_np[t, focus_obj],
             true_pos=current_true,
             hidden=hidden,
@@ -337,7 +352,7 @@ def build_demo_for_seed(
         )
         overlay_panel = make_panel(overlay, "Belief particles + truth", panel_scale)
         world = draw_3d_belief_panel(
-            cfg=scene_cfg,
+            cfg=effective_cfg,
             particles=particles_np[t, focus_obj],
             true_history=history,
             current_true=current_true,
@@ -360,8 +375,10 @@ def build_demo_for_seed(
         "seed": seed,
         "focus_object": focus_obj,
         "mode": "physics_particle_belief",
+        "scenario": sample["metadata"]["scenario"],
         "obs_len": obs_len,
         "horizon": horizon,
+        "target": target_metadata,
         "metrics": metrics,
         "artifacts": {"gif": str(gif_path), "preview": str(preview_path)},
     }
@@ -389,6 +406,7 @@ def main() -> None:
             fps=int(args.fps),
             max_particles=int(args.max_particles),
             panel_scale=max(1, int(args.panel_scale)),
+            scenario=args.scenario,
         )
 
 

@@ -58,6 +58,12 @@ class Scene3DConfig:
     light_dir_x: float = -0.35
     light_dir_y: float = 0.45
     light_dir_z: float = 0.82
+    scenario: str = "random"
+    target_min_hidden: int = 5
+    target_max_hidden: int = 14
+    target_min_visible_tail: int = 5
+    target_occluder_count_min: int = 1
+    target_occluder_count_max: int = 3
 
 
 def _clamp(v: float, lo: float, hi: float) -> float:
@@ -183,6 +189,130 @@ class SyntheticScene3DGenerator:
         state[STATE_INDEX_3D["color_id"]] = _normalize_id(color_id, len(COLORS_3D))
         state[STATE_INDEX_3D["object_id"]] = _normalize_id(object_idx, cfg.max_objects)
         return state
+
+    def _make_object_state(
+        self,
+        pos: np.ndarray,
+        vel: np.ndarray,
+        size: float,
+        shape_id: int,
+        color_id: int,
+        object_idx: int,
+        cfg: Scene3DConfig,
+    ) -> np.ndarray:
+        state = np.zeros((STATE_DIM_3D,), dtype=np.float32)
+        state[STATE_INDEX_3D["x"] : STATE_INDEX_3D["z"] + 1] = pos.astype(np.float32)
+        state[STATE_INDEX_3D["vx"] : STATE_INDEX_3D["vz"] + 1] = vel.astype(np.float32)
+        state[STATE_INDEX_3D["visible"]] = 1.0
+        state[STATE_INDEX_3D["occluded"]] = 0.0
+        state[STATE_INDEX_3D["size"]] = float(size)
+        state[STATE_INDEX_3D["shape_id"]] = _normalize_id(shape_id, len(SHAPES_3D))
+        state[STATE_INDEX_3D["color_id"]] = _normalize_id(color_id, len(COLORS_3D))
+        state[STATE_INDEX_3D["object_id"]] = _normalize_id(object_idx, cfg.max_objects)
+        return state
+
+    def _target_hidden_window(self, rng: np.random.Generator, cfg: Scene3DConfig) -> tuple[int, int, int]:
+        min_tail = max(1, min(int(cfg.target_min_visible_tail), max(1, cfg.seq_len - cfg.obs_len - 2)))
+        start_low = min(max(1, cfg.obs_len), max(1, cfg.seq_len - min_tail - 2))
+        start_high = max(start_low, min(cfg.obs_len + 3, cfg.seq_len - min_tail - 2))
+        hidden_start = int(rng.integers(start_low, start_high + 1))
+        max_hidden = max(1, min(int(cfg.target_max_hidden), cfg.seq_len - hidden_start - min_tail))
+        min_hidden = max(1, min(int(cfg.target_min_hidden), max_hidden))
+        hidden_duration = int(rng.integers(min_hidden, max_hidden + 1))
+        hidden_end = min(cfg.seq_len - min_tail - 1, hidden_start + hidden_duration - 1)
+        return hidden_start, hidden_end, hidden_end + 1
+
+    def _target_path(
+        self,
+        rng: np.random.Generator,
+        cfg: Scene3DConfig,
+        hidden_start: int,
+        hidden_end: int,
+        size: float,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        margin = size + 0.08
+        lo = cfg.world_min + margin
+        hi = cfg.world_max - margin
+        center_xy = rng.uniform(-0.18, 0.18, size=(2,))
+        theta = float(rng.uniform(0.0, 2.0 * np.pi))
+        direction_xy = np.array([np.cos(theta), np.sin(theta)], dtype=np.float32)
+        hidden_mid = 0.5 * float(hidden_start + hidden_end)
+
+        max_speed = float("inf")
+        for axis in range(2):
+            for t in (0.0, float(cfg.seq_len - 1)):
+                coeff = float(direction_xy[axis]) * (t - hidden_mid)
+                if coeff > 1e-6:
+                    max_speed = min(max_speed, (hi - float(center_xy[axis])) / coeff)
+                elif coeff < -1e-6:
+                    max_speed = min(max_speed, (lo - float(center_xy[axis])) / coeff)
+        if not np.isfinite(max_speed) or max_speed <= 0.0:
+            max_speed = cfg.velocity_scale
+        base_speed = cfg.velocity_scale * float(rng.uniform(0.85, 1.45))
+        speed_xy = min(max_speed * 0.9, base_speed)
+        if speed_xy < min(max_speed * 0.45, cfg.velocity_scale * 0.55):
+            speed_xy = max_speed * float(rng.uniform(0.45, 0.75))
+
+        z_center = float(rng.uniform(-0.55, 0.05))
+        max_z_speed = min((hi - z_center) / max(float(cfg.seq_len - 1) - hidden_mid, 1.0), (z_center - lo) / max(hidden_mid, 1.0))
+        z_speed = float(rng.uniform(-0.35, 0.35) * max(0.0, max_z_speed))
+        velocity = np.array([direction_xy[0] * speed_xy, direction_xy[1] * speed_xy, z_speed], dtype=np.float32)
+        pos0 = np.array(
+            [
+                center_xy[0] - velocity[0] * hidden_mid,
+                center_xy[1] - velocity[1] * hidden_mid,
+                z_center - velocity[2] * hidden_mid,
+            ],
+            dtype=np.float32,
+        )
+        times = np.arange(cfg.seq_len, dtype=np.float32)[:, None]
+        positions = pos0[None, :] + velocity[None, :] * times
+        positions = np.clip(positions, lo, hi).astype(np.float32)
+        return positions, pos0, velocity
+
+    def _target_occluders(
+        self,
+        rng: np.random.Generator,
+        cfg: Scene3DConfig,
+        target_positions: np.ndarray,
+        target_size: float,
+        hidden_start: int,
+        hidden_end: int,
+    ) -> tuple[np.ndarray, list[int]]:
+        max_count = max(1, min(cfg.max_occluders, int(cfg.target_occluder_count_max)))
+        min_count = max(1, min(max_count, int(cfg.target_occluder_count_min)))
+        num_occluders = int(rng.integers(min_count, max_count + 1))
+        hidden_frames = np.arange(hidden_start, hidden_end + 1)
+        segments = [seg for seg in np.array_split(hidden_frames, num_occluders) if len(seg) > 0]
+        occluders = np.zeros((cfg.max_occluders, 6), dtype=np.float32)
+        target_indices: list[int] = []
+        span = cfg.world_max - cfg.world_min
+        for idx, segment in enumerate(segments[: cfg.max_occluders]):
+            seg_pos = target_positions[segment]
+            padding = float(target_size * rng.uniform(0.35, 0.75) + rng.uniform(0.01, 0.03) * span)
+            x0 = float(np.min(seg_pos[:, 0]) - padding)
+            x1 = float(np.max(seg_pos[:, 0]) + padding)
+            y0 = float(np.min(seg_pos[:, 1]) - padding)
+            y1 = float(np.max(seg_pos[:, 1]) + padding)
+            jitter = rng.uniform(-0.035, 0.035, size=(2,))
+            x0 += float(jitter[0])
+            x1 += float(jitter[0])
+            y0 += float(jitter[1])
+            y1 += float(jitter[1])
+            min_box_span = 0.08 * span
+            x0 = _clamp(x0, cfg.world_min + 0.04, cfg.world_max - 0.04 - min_box_span)
+            y0 = _clamp(y0, cfg.world_min + 0.04, cfg.world_max - 0.04 - min_box_span)
+            x1 = _clamp(x1, x0 + min_box_span, cfg.world_max - 0.04)
+            y1 = _clamp(y1, y0 + min_box_span, cfg.world_max - 0.04)
+            thickness = float(rng.uniform(0.05, 0.14) * span)
+            target_front_min = float(np.max(seg_pos[:, 2]) + target_size + 0.08)
+            front_low = min(max(target_front_min, 0.12), cfg.world_max - 0.08)
+            front_z = float(rng.uniform(front_low, cfg.world_max - 0.04))
+            z0 = _clamp(front_z - thickness, cfg.world_min + 0.04, cfg.world_max - 0.04)
+            z1 = _clamp(front_z, z0 + 0.03 * span, cfg.world_max - 0.04)
+            occluders[idx] = np.array([x0, y0, z0, x1, y1, z1], dtype=np.float32)
+            target_indices.append(idx)
+        return occluders, target_indices
 
     def _advance_one_step(self, state: np.ndarray, cfg: Scene3DConfig) -> np.ndarray:
         updated = state.copy()
@@ -417,6 +547,160 @@ class SyntheticScene3DGenerator:
             frames[t], depth[t] = self.render_state_with_depth(states[t], object_mask[t], occluders)
         return frames, depth
 
+    def _apply_visibility(self, states: np.ndarray, object_mask: np.ndarray, occluders: np.ndarray, cfg: Scene3DConfig) -> None:
+        for t in range(cfg.seq_len):
+            for i in range(cfg.max_objects):
+                if object_mask[t, i] < 0.5:
+                    continue
+                pos = states[t, i, STATE_INDEX_3D["x"] : STATE_INDEX_3D["z"] + 1]
+                occluded = point_occluded(pos, occluders)
+                states[t, i, STATE_INDEX_3D["visible"]] = 0.0 if occluded else 1.0
+                states[t, i, STATE_INDEX_3D["occluded"]] = 1.0 if occluded else 0.0
+
+    def _target_metadata(
+        self,
+        states: np.ndarray,
+        target_idx: int,
+        hidden_start: int,
+        hidden_end: int,
+        reappearance_frame: int,
+        target_positions: np.ndarray,
+        target_velocity: np.ndarray,
+        target_occluder_indices: list[int],
+    ) -> Dict[str, Any]:
+        occluded = states[:, target_idx, STATE_INDEX_3D["occluded"]] > 0.5
+        hidden_frames = np.flatnonzero(occluded).astype(int).tolist()
+        actual_start = int(hidden_frames[0]) if hidden_frames else None
+        actual_end = int(hidden_frames[-1]) if hidden_frames else None
+        actual_reappearance = None
+        if hidden_frames:
+            for t in range(hidden_frames[-1] + 1, states.shape[0]):
+                if not bool(occluded[t]):
+                    actual_reappearance = int(t)
+                    break
+        return {
+            "object_index": int(target_idx),
+            "planned_occlusion_start": int(hidden_start),
+            "planned_occlusion_end": int(hidden_end),
+            "planned_reappearance_frame": int(reappearance_frame),
+            "occlusion_start": actual_start,
+            "occlusion_end": actual_end,
+            "reappearance_frame": actual_reappearance,
+            "hidden_frames": hidden_frames,
+            "visible_before": int(np.sum(~occluded[: max(hidden_start, 0)])),
+            "visible_after": int(np.sum(~occluded[min(reappearance_frame, states.shape[0]) :])),
+            "path_start": target_positions[0].astype(float).tolist(),
+            "path_end": target_positions[-1].astype(float).tolist(),
+            "velocity": target_velocity.astype(float).tolist(),
+            "occluder_indices": [int(idx) for idx in target_occluder_indices],
+            "num_target_occluders": int(len(target_occluder_indices)),
+        }
+
+    def _generate_random_states(self, rng: np.random.Generator, cfg: Scene3DConfig) -> tuple[np.ndarray, np.ndarray, np.ndarray, Dict[str, Any]]:
+        num_objects = int(rng.integers(cfg.min_objects, cfg.max_objects + 1))
+        occluders = self._sample_occluders(rng, cfg)
+        state_t = np.zeros((cfg.max_objects, STATE_DIM_3D), dtype=np.float32)
+        object_mask_t = np.zeros((cfg.max_objects,), dtype=np.float32)
+        for i in range(num_objects):
+            state_t[i] = self._sample_object_state(rng, cfg, occluders, object_idx=i)
+            object_mask_t[i] = 1.0
+
+        states = np.zeros((cfg.seq_len, cfg.max_objects, STATE_DIM_3D), dtype=np.float32)
+        object_mask = np.zeros((cfg.seq_len, cfg.max_objects), dtype=np.float32)
+        for t in range(cfg.seq_len):
+            if t > 0:
+                for i in range(num_objects):
+                    state_t[i] = self._advance_one_step(state_t[i], cfg)
+            states[t] = state_t
+            object_mask[t] = object_mask_t
+        self._apply_visibility(states, object_mask, occluders, cfg)
+        return states, object_mask, occluders, {"num_objects": int(num_objects)}
+
+    def _target_episode_is_valid(self, target: Dict[str, Any], cfg: Scene3DConfig) -> bool:
+        start = target.get("occlusion_start")
+        reappearance = target.get("reappearance_frame")
+        hidden_frames = target.get("hidden_frames", [])
+        if start is None or reappearance is None:
+            return False
+        if int(start) < int(cfg.obs_len):
+            return False
+        if len(hidden_frames) < max(1, int(cfg.target_min_hidden)):
+            return False
+        if int(target.get("visible_after", 0)) < max(1, int(cfg.target_min_visible_tail)):
+            return False
+        return True
+
+    def _generate_targeted_occlusion_attempt(
+        self, rng: np.random.Generator, cfg: Scene3DConfig
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, Dict[str, Any]]:
+        num_objects = int(rng.integers(max(1, cfg.min_objects), cfg.max_objects + 1))
+        target_idx = 0
+        target_size = float(rng.uniform(cfg.object_size_min, cfg.object_size_max))
+        hidden_start, hidden_end, reappearance_frame = self._target_hidden_window(rng, cfg)
+        target_positions, _pos0, target_velocity = self._target_path(rng, cfg, hidden_start, hidden_end, target_size)
+        occluders, target_occluder_indices = self._target_occluders(
+            rng,
+            cfg,
+            target_positions=target_positions,
+            target_size=target_size,
+            hidden_start=hidden_start,
+            hidden_end=hidden_end,
+        )
+
+        state_t = np.zeros((cfg.max_objects, STATE_DIM_3D), dtype=np.float32)
+        object_mask_t = np.zeros((cfg.max_objects,), dtype=np.float32)
+        target_shape = int(rng.integers(0, len(SHAPES_3D)))
+        target_color = int(rng.integers(0, len(COLORS_3D)))
+        state_t[target_idx] = self._make_object_state(
+            target_positions[0],
+            target_velocity,
+            target_size,
+            target_shape,
+            target_color,
+            object_idx=target_idx,
+            cfg=cfg,
+        )
+        object_mask_t[target_idx] = 1.0
+        for i in range(1, num_objects):
+            state_t[i] = self._sample_object_state(rng, cfg, occluders, object_idx=i)
+            object_mask_t[i] = 1.0
+
+        states = np.zeros((cfg.seq_len, cfg.max_objects, STATE_DIM_3D), dtype=np.float32)
+        object_mask = np.zeros((cfg.seq_len, cfg.max_objects), dtype=np.float32)
+        for t in range(cfg.seq_len):
+            if t > 0:
+                for i in range(1, num_objects):
+                    state_t[i] = self._advance_one_step(state_t[i], cfg)
+            state_t[target_idx, STATE_INDEX_3D["x"] : STATE_INDEX_3D["z"] + 1] = target_positions[t]
+            state_t[target_idx, STATE_INDEX_3D["vx"] : STATE_INDEX_3D["vz"] + 1] = target_velocity
+            states[t] = state_t
+            object_mask[t] = object_mask_t
+        self._apply_visibility(states, object_mask, occluders, cfg)
+        target_meta = self._target_metadata(
+            states=states,
+            target_idx=target_idx,
+            hidden_start=hidden_start,
+            hidden_end=hidden_end,
+            reappearance_frame=reappearance_frame,
+            target_positions=target_positions,
+            target_velocity=target_velocity,
+            target_occluder_indices=target_occluder_indices,
+        )
+        return states, object_mask, occluders, {"num_objects": int(num_objects), "target": target_meta}
+
+    def _generate_targeted_occlusion_states(
+        self, rng: np.random.Generator, cfg: Scene3DConfig
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, Dict[str, Any]]:
+        last_result = self._generate_targeted_occlusion_attempt(rng, cfg)
+        if self._target_episode_is_valid(last_result[3]["target"], cfg):
+            return last_result
+        for _ in range(63):
+            candidate = self._generate_targeted_occlusion_attempt(rng, cfg)
+            if self._target_episode_is_valid(candidate[3]["target"], cfg):
+                return candidate
+            last_result = candidate
+        return last_result
+
     def generate(
         self,
         seed: int,
@@ -428,27 +712,10 @@ class SyntheticScene3DGenerator:
         self.config = cfg
         try:
             rng = np.random.default_rng(seed)
-            num_objects = int(rng.integers(cfg.min_objects, cfg.max_objects + 1))
-            occluders = self._sample_occluders(rng, cfg)
-            state_t = np.zeros((cfg.max_objects, STATE_DIM_3D), dtype=np.float32)
-            object_mask_t = np.zeros((cfg.max_objects,), dtype=np.float32)
-            for i in range(num_objects):
-                state_t[i] = self._sample_object_state(rng, cfg, occluders, object_idx=i)
-                object_mask_t[i] = 1.0
-
-            states = np.zeros((cfg.seq_len, cfg.max_objects, STATE_DIM_3D), dtype=np.float32)
-            object_mask = np.zeros((cfg.seq_len, cfg.max_objects), dtype=np.float32)
-            for t in range(cfg.seq_len):
-                if t > 0:
-                    for i in range(num_objects):
-                        state_t[i] = self._advance_one_step(state_t[i], cfg)
-                for i in range(num_objects):
-                    pos = state_t[i, STATE_INDEX_3D["x"] : STATE_INDEX_3D["z"] + 1]
-                    occluded = point_occluded(pos, occluders)
-                    state_t[i, STATE_INDEX_3D["visible"]] = 0.0 if occluded else 1.0
-                    state_t[i, STATE_INDEX_3D["occluded"]] = 1.0 if occluded else 0.0
-                states[t] = state_t
-                object_mask[t] = object_mask_t
+            if cfg.scenario == "targeted_occlusion":
+                states, object_mask, occluders, scenario_metadata = self._generate_targeted_occlusion_states(rng, cfg)
+            else:
+                states, object_mask, occluders, scenario_metadata = self._generate_random_states(rng, cfg)
 
             frames, depth = self.render_sequence_with_depth(states, object_mask, occluders)
             return {
@@ -459,9 +726,11 @@ class SyntheticScene3DGenerator:
                 "occluders": occluders.astype(np.float32),
                 "metadata": {
                     "seed": int(seed),
-                    "num_objects": int(num_objects),
+                    "scenario": cfg.scenario,
+                    "num_objects": int(scenario_metadata["num_objects"]),
                     "tags": tags or [],
                     "config": asdict(cfg),
+                    **{k: v for k, v in scenario_metadata.items() if k != "num_objects"},
                 },
             }
         finally:

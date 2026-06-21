@@ -51,6 +51,8 @@ Target 3D setup:
 - state: `[x, y, z, vx, vy, vz, visible, occluded, size, shape_id, color_id, object_id]`
 - observations: one or more low-res camera views, e.g. 64x64, 96x96, or the current 128x128 local stress-test setting
 - current renderer: fixed perspective camera with depth buffering, simple Lambert/specular shading for spheres, shaded cube/occluder faces, and normalized depth maps exposed as `obs_depth` / `future_depth`
+- current targeted split: `test_targeted_occlusion` keeps random scenes intact while adding controlled episodes where a target object starts visible, moves behind one or more varied occluders on a randomized 3D path, and reappears
+- target metadata: targeted samples store `object_index`, planned/actual occlusion windows, `reappearance_frame`, `hidden_frames`, target path endpoints, velocity, and occluder indices
 - belief: particles, Gaussian mixtures, or sparse splats over `(x, y, z)`
 - renderer: simple projection renderer first; optional PyTorch3D, nvdiffrast, or Three.js later
 - compute target: Kaggle/Colab friendly, generated from seeds, no giant cached datasets

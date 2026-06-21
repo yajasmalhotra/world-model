@@ -32,6 +32,12 @@ SCENE3D_CONFIG_KEYS = {
     "light_dir_x",
     "light_dir_y",
     "light_dir_z",
+    "scenario",
+    "target_min_hidden",
+    "target_max_hidden",
+    "target_min_visible_tail",
+    "target_occluder_count_min",
+    "target_occluder_count_max",
 }
 
 
@@ -78,6 +84,7 @@ class SyntheticScene3DDataset(Dataset):
             "scene_id": row["scene_id"],
             "seed": int(row["seed"]),
             "tags": row.get("tags", []),
+            "metadata": sample["metadata"],
             "obs_frames": torch.from_numpy(obs_frames).permute(0, 3, 1, 2).contiguous(),
             "future_frames": torch.from_numpy(future_frames).permute(0, 3, 1, 2).contiguous(),
             "obs_depth": torch.from_numpy(obs_depth).unsqueeze(1).contiguous(),

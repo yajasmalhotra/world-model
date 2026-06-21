@@ -60,6 +60,23 @@ def load_image_encoder(config: Dict, device: torch.device, ckpt_path: Optional[s
     return model
 
 
+def target_object_mask(batch: Dict, future_mask: torch.Tensor) -> Optional[torch.Tensor]:
+    metadata = batch.get("metadata")
+    if not metadata:
+        return None
+    target_mask = torch.zeros_like(future_mask)
+    found = False
+    for b_idx, item in enumerate(metadata):
+        target = item.get("target") if isinstance(item, dict) else None
+        if not target:
+            continue
+        obj_idx = int(target.get("object_index", -1))
+        if 0 <= obj_idx < future_mask.shape[-1]:
+            target_mask[b_idx, :, obj_idx] = future_mask[b_idx, :, obj_idx]
+            found = True
+    return target_mask if found else None
+
+
 @torch.no_grad()
 def evaluate_split(
     loader: DataLoader,
@@ -107,6 +124,18 @@ def evaluate_split(
             mass_radius=float(belief_cfg["mass_radius"]),
             credible_levels=belief_cfg.get("credible_levels", [0.5, 0.7, 0.9]),
         )
+        target_mask = target_object_mask(batch, future_mask)
+        if target_mask is not None:
+            target_metrics = particle_belief_metrics(
+                particles,
+                weights,
+                future_state,
+                target_mask,
+                density_sigma=float(belief_cfg["density_sigma"]),
+                mass_radius=float(belief_cfg["mass_radius"]),
+                credible_levels=belief_cfg.get("credible_levels", [0.5, 0.7, 0.9]),
+            )
+            metrics.update({f"target_{key}": value for key, value in target_metrics.items()})
         rows.append(metrics)
     return summarize_metric_rows(rows)
 

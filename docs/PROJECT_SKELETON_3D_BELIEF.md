@@ -77,6 +77,8 @@ This skeleton should be introduced incrementally. Do not rename or remove the ex
 - Resolution: 64x64 for smoke/main, with a local 128x128 stress-test config for nicer 3D renders.
 - State: `[x, y, z, vx, vy, vz, visible, occluded, size, shape_id, color_id, object_id]`.
 - Observations: RGB camera frames plus normalized depth maps. The raster resolution is 2D, but the scene state, projection, occlusion, and belief target are 3D.
+- Splits: keep random train/val/test scenes, and add `test_targeted_occlusion` for controlled visible-hidden-reappearing target episodes with randomized paths and one or more varied occluders.
+- Target metadata: targeted scenes store `object_index`, planned and actual occlusion windows, `reappearance_frame`, `hidden_frames`, path endpoints, velocity, and target occluder indices.
 
 ### Belief Representation
 
@@ -114,6 +116,7 @@ Let `B_t(p)` be the normalized belief density over 3D position and `x_t` the tru
 - **Credible-region calibration:** 50/70/90 percent regions should contain truth about 50/70/90 percent of the time.
 - **Occlusion degradation:** plot each metric against occlusion duration.
 - **Surprise:** low belief density at a reappearing location should produce high surprise.
+- **Target metrics:** on targeted scenes, report both aggregate hidden-object metrics and target-only metrics keyed from the stored metadata.
 
 ## Baselines
 

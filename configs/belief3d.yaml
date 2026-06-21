@@ -28,6 +28,12 @@ data3d:
   light_dir_x: -0.35
   light_dir_y: 0.45
   light_dir_z: 0.82
+  scenario: random
+  target_min_hidden: 5
+  target_max_hidden: 14
+  target_min_visible_tail: 5
+  target_occluder_count_min: 1
+  target_occluder_count_max: 3
 
 belief:
   num_particles: 256
@@ -66,3 +72,4 @@ eval:
     - test_long_occlusion
     - test_unseen_speed
     - test_unseen_occluders
+    - test_targeted_occlusion

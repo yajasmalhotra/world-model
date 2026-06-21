@@ -56,5 +56,18 @@
     "overrides": {
       "occluder_layout": "edge_bias"
     }
+  },
+  "test_targeted_occlusion": {
+    "path": "data/manifests3d_mvp/test_targeted_occlusion.jsonl",
+    "count": 32,
+    "tags": [
+      "test",
+      "targeted_occlusion"
+    ],
+    "overrides": {
+      "scenario": "targeted_occlusion",
+      "seq_len": 24,
+      "obs_len": 7
+    }
   }
 }

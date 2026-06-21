@@ -27,6 +27,8 @@ Demo export command:
 python scripts/export_belief3d_demo_assets.py --config configs/belief3d_smoke.yaml --seeds 2026
 ```
 
+The demo command defaults to the targeted occlusion scenario: visible lead-in, hidden target trajectory, and reappearance. Use `--scenario random` for the original incidental-occlusion scenes.
+
 ## Config Tiers
 
 Use three tiers once the 3D path exists:

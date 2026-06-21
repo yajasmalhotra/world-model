@@ -40,6 +40,7 @@ Included splits:
 - `test_long_occlusion.jsonl`: longer rollouts with extended occlusion
 - `test_unseen_speed.jsonl`: higher-speed generalization scenes
 - `test_unseen_occluders.jsonl`: shifted occluder-layout generalization scenes
+- `test_targeted_occlusion.jsonl`: controlled 3D object-permanence episodes where a target object starts visible, passes behind one or more varied occluders, and reappears
 - `manifest_index.json`: split metadata and counts
 
 The corresponding Hugging Face dataset is `yajasm/world-model`, listed in the metadata block above. Generated caches remain local under `data/cache/` and are intentionally ignored.
@@ -134,6 +135,8 @@ Export a visual 3D belief demo with RGB frames, depth, projected particles, the 
 ```bash
 python scripts/export_belief3d_demo_assets.py --config configs/belief3d_smoke.yaml --seeds 2026
 ```
+
+By default the 3D demo uses the targeted occlusion scenario and writes target metadata, including `object_index`, `occlusion_start`, `occlusion_end`, `reappearance_frame`, `hidden_frames`, and target occluder indices.
 
 This path is additive and does not modify the original 2D training pipeline.
 
