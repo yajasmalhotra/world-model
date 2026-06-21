@@ -157,6 +157,54 @@ class BeliefJEPA3D(nn.Module):
         return out
 
 
+def _deterministic_sketch_directions(
+    latent_dim: int,
+    num_sketches: int,
+    device: torch.device,
+    dtype: torch.dtype,
+    sketch_scale: float,
+) -> torch.Tensor:
+    count = max(1, int(num_sketches))
+    idx = torch.arange(count * latent_dim, device=device, dtype=dtype).reshape(count, latent_dim)
+    directions = torch.sin(idx * 12.9898 + 78.233) + 0.5 * torch.cos(idx * 4.1414 + 19.19)
+    directions = directions / directions.norm(dim=-1, keepdim=True).clamp_min(1e-6)
+    return directions * float(sketch_scale)
+
+
+def sketched_isotropic_gaussian_regularizer(
+    latents: torch.Tensor,
+    mask: torch.Tensor,
+    num_sketches: int = 16,
+    sketch_scale: float = 1.0,
+) -> torch.Tensor:
+    """
+    LeJEPA-style lightweight SIGReg: match random low-dimensional sketches of
+    the latent distribution to the characteristic function of N(0, I).
+    """
+    flat = latents[mask > 0.5]
+    if flat.shape[0] == 0:
+        return latents.sum() * 0.0
+    directions = _deterministic_sketch_directions(
+        latent_dim=flat.shape[-1],
+        num_sketches=num_sketches,
+        device=flat.device,
+        dtype=flat.dtype,
+        sketch_scale=sketch_scale,
+    )
+    projections = flat @ directions.T
+    target_real = torch.exp(-0.5 * torch.sum(directions * directions, dim=-1))
+    real_loss = (torch.cos(projections).mean(dim=0) - target_real).pow(2)
+    imag_loss = torch.sin(projections).mean(dim=0).pow(2)
+    return (real_loss + imag_loss).mean()
+
+
+def _masked_std(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    selected = values[mask > 0.5]
+    if selected.numel() == 0:
+        return values.sum() * 0.0
+    return selected.std(unbiased=False)
+
+
 def belief_jepa_loss(
     outputs: dict[str, torch.Tensor],
     future_state: torch.Tensor,
@@ -164,6 +212,9 @@ def belief_jepa_loss(
     latent_weight: float = 1.0,
     belief_weight: float = 0.5,
     target_recon_weight: float = 0.1,
+    sigreg_weight: float = 0.0,
+    sigreg_sketches: int = 16,
+    sigreg_scale: float = 1.0,
 ) -> dict[str, torch.Tensor]:
     steps = min(outputs["mean"].shape[1], future_state.shape[1])
     mask = future_mask[:, :steps].unsqueeze(-1)
@@ -183,16 +234,38 @@ def belief_jepa_loss(
 
     pos_rmse = torch.sqrt(((mean[..., 0:3] - target[..., 0:3]) ** 2).sum(dim=-1).clamp_min(1e-12))
     pos_rmse = (pos_rmse * future_mask[:, :steps]).sum() / future_mask[:, :steps].sum().clamp_min(1.0)
-    pred_std = pred_latent[mask.expand_as(pred_latent) > 0.5].std(unbiased=False)
-    target_std = target_latent[mask.expand_as(target_latent) > 0.5].std(unbiased=False)
+    pred_std = _masked_std(pred_latent, mask.expand_as(pred_latent))
+    target_std = _masked_std(target_latent, mask.expand_as(target_latent))
     cosine = F.cosine_similarity(pred_latent, target_latent, dim=-1)
     pred_target_cosine = (cosine * future_mask[:, :steps]).sum() / future_mask[:, :steps].sum().clamp_min(1.0)
-    total = latent_weight * latent_mse + belief_weight * belief_nll + target_recon_weight * target_recon_mse
+    pred_sigreg = sketched_isotropic_gaussian_regularizer(
+        pred_latent,
+        future_mask[:, :steps],
+        num_sketches=sigreg_sketches,
+        sketch_scale=sigreg_scale,
+    )
+    online_target_latent = outputs.get("online_target_latent", outputs["target_latent"])[:, :steps]
+    target_sigreg = sketched_isotropic_gaussian_regularizer(
+        online_target_latent,
+        future_mask[:, :steps],
+        num_sketches=sigreg_sketches,
+        sketch_scale=sigreg_scale,
+    )
+    sigreg = 0.5 * (pred_sigreg + target_sigreg)
+    total = (
+        latent_weight * latent_mse
+        + belief_weight * belief_nll
+        + target_recon_weight * target_recon_mse
+        + float(sigreg_weight) * sigreg
+    )
     return {
         "total": total,
         "latent_mse": latent_mse,
         "belief_nll": belief_nll,
         "target_recon_mse": target_recon_mse,
+        "sigreg": sigreg,
+        "pred_sigreg": pred_sigreg,
+        "target_sigreg": target_sigreg,
         "pos_rmse": pos_rmse,
         "target_latent_std": target_std,
         "pred_latent_std": pred_std,
@@ -216,6 +289,6 @@ def belief_jepa_diagnostics(
     return {
         "latent_mse": latent_mse,
         "pred_target_cosine": pred_target_cosine,
-        "target_latent_std": target_latent[mask.expand_as(target_latent) > 0.5].std(unbiased=False),
-        "pred_latent_std": pred_latent[mask.expand_as(pred_latent) > 0.5].std(unbiased=False),
+        "target_latent_std": _masked_std(target_latent, mask.expand_as(target_latent)),
+        "pred_latent_std": _masked_std(pred_latent, mask.expand_as(pred_latent)),
     }

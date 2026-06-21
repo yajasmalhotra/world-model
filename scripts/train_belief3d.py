@@ -31,6 +31,7 @@ from src.train.utils import (
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train supervised 3D image-to-belief encoder.")
     parser.add_argument("--config", type=str, default="configs/belief3d.yaml")
+    parser.add_argument("--rgbd", action="store_true", help="Use RGB-D context frames instead of RGB only.")
     return parser.parse_args()
 
 
@@ -39,11 +40,19 @@ def make_loader(manifest_path: Path, data_cfg: Dict, batch_size: int, shuffle: b
     return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, num_workers=0, collate_fn=collate_scenes3d)
 
 
-def build_model(config: Dict, device: torch.device) -> ImageToBeliefEncoder3D:
+def context_frames(batch: Dict, device: torch.device, rgbd: bool) -> torch.Tensor:
+    frames = batch["obs_frames"].to(device)
+    if not rgbd:
+        return frames
+    return torch.cat([frames, batch["obs_depth"].to(device)], dim=2)
+
+
+def build_model(config: Dict, device: torch.device, rgbd: bool) -> ImageToBeliefEncoder3D:
     model_cfg = config["model3d"]
     data_cfg = config["data3d"]
     return ImageToBeliefEncoder3D(
         max_objects=int(model_cfg["max_objects"]),
+        input_channels=4 if rgbd else 3,
         cnn_dim=int(model_cfg["encoder_cnn_dim"]),
         rnn_dim=int(model_cfg["encoder_rnn_dim"]),
         world_min=float(data_cfg["world_min"]),
@@ -55,16 +64,16 @@ def build_model(config: Dict, device: torch.device) -> ImageToBeliefEncoder3D:
 
 
 @torch.no_grad()
-def evaluate_val(model: ImageToBeliefEncoder3D, loader: DataLoader, device: torch.device) -> Dict[str, float]:
+def evaluate_val(model: ImageToBeliefEncoder3D, loader: DataLoader, device: torch.device, rgbd: bool) -> Dict[str, float]:
     model.eval()
     rows: list[Dict[str, float]] = []
     for batch in loader:
-        obs_frames = batch["obs_frames"].to(device)
+        frames = context_frames(batch, device, rgbd)
         obs_state = batch["obs_state"].to(device)
         obs_mask = batch["obs_mask"].to(device)
         target = obs_state[:, -1]
         object_mask = obs_mask[:, -1]
-        outputs = model(obs_frames)
+        outputs = model(frames)
         loss_dict = gaussian_belief_loss(outputs, target, object_mask)
         rows.append({key: float(value.item()) for key, value in loss_dict.items()})
     if not rows:
@@ -85,7 +94,7 @@ def main() -> None:
 
     train_loader = make_loader(manifest_dir / "train.jsonl", data_cfg, batch_size=batch_size, shuffle=True)
     val_loader = make_loader(manifest_dir / "val.jsonl", data_cfg, batch_size=batch_size, shuffle=False)
-    model = build_model(config, device)
+    model = build_model(config, device, rgbd=args.rgbd)
     optimizer = Adam(
         model.parameters(),
         lr=float(train_cfg["lr"]),
@@ -93,7 +102,8 @@ def main() -> None:
     )
     epochs = int(train_cfg["epochs"])
     grad_clip = float(train_cfg["grad_clip"])
-    run_dir = init_run_dir(config["project"]["output_root"], "train_belief3d_encoder", config)
+    run_name = "train_belief3d_encoder_rgbd" if args.rgbd else "train_belief3d_encoder"
+    run_dir = init_run_dir(config["project"]["output_root"], run_name, config)
     best_metric = math.inf
     best_ckpt = run_dir / "checkpoints" / "best.pt"
 
@@ -101,12 +111,12 @@ def main() -> None:
         model.train()
         train_losses: list[float] = []
         for batch in train_loader:
-            obs_frames = batch["obs_frames"].to(device)
+            frames = context_frames(batch, device, args.rgbd)
             obs_state = batch["obs_state"].to(device)
             obs_mask = batch["obs_mask"].to(device)
             target = obs_state[:, -1]
             object_mask = obs_mask[:, -1]
-            outputs = model(obs_frames)
+            outputs = model(frames)
             loss_dict = gaussian_belief_loss(outputs, target, object_mask)
             loss = loss_dict["total"]
             optimizer.zero_grad()
@@ -115,9 +125,10 @@ def main() -> None:
             optimizer.step()
             train_losses.append(float(loss.item()))
 
-        val_metrics = evaluate_val(model, val_loader, device)
+        val_metrics = evaluate_val(model, val_loader, device, args.rgbd)
         row = {
             "epoch": epoch,
+            "rgbd": float(args.rgbd),
             "train_loss": float(sum(train_losses) / max(len(train_losses), 1)),
             **val_metrics,
         }
@@ -134,14 +145,16 @@ def main() -> None:
                     "config": config,
                     "epoch": epoch,
                     "best_metric": best_metric,
+                    "rgbd": bool(args.rgbd),
                 },
             )
 
     summary = {
-        "run_type": "train_belief3d_encoder",
+        "run_type": run_name,
         "best_checkpoint": str(best_ckpt),
         "best_val_pos_rmse": best_metric,
         "device": str(device),
+        "rgbd": bool(args.rgbd),
     }
     save_summary(run_dir, summary)
     print(f"Done. Best checkpoint: {best_ckpt}")

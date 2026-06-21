@@ -4,7 +4,12 @@ import unittest
 
 import torch
 
-from src.models.belief_jepa3d import BeliefJEPA3D, belief_jepa_diagnostics, belief_jepa_loss
+from src.models.belief_jepa3d import (
+    BeliefJEPA3D,
+    belief_jepa_diagnostics,
+    belief_jepa_loss,
+    sketched_isotropic_gaussian_regularizer,
+)
 
 
 class BeliefJEPAEMATest(unittest.TestCase):
@@ -70,6 +75,28 @@ class BeliefJEPAEMATest(unittest.TestCase):
         self.assertIn("latent_mse", diagnostics)
         self.assertIn("pred_target_cosine", diagnostics)
         self.assertTrue(torch.isfinite(diagnostics["latent_mse"]))
+
+    def test_sigreg_is_finite_and_contributes_to_loss(self) -> None:
+        model = self._make_model()
+        model.sync_ema_target_encoder()
+        frames, future_state, future_mask = self._make_batch()
+        outputs = model(frames, future_state=future_state, use_ema_target=True)
+
+        no_sigreg = belief_jepa_loss(outputs, future_state, future_mask, sigreg_weight=0.0)
+        with_sigreg = belief_jepa_loss(outputs, future_state, future_mask, sigreg_weight=0.2, sigreg_sketches=8)
+
+        self.assertIn("sigreg", with_sigreg)
+        self.assertIn("pred_sigreg", with_sigreg)
+        self.assertIn("target_sigreg", with_sigreg)
+        self.assertTrue(torch.isfinite(with_sigreg["sigreg"]))
+        self.assertGreater(float(with_sigreg["total"] - no_sigreg["total"]), 0.0)
+
+    def test_sigreg_handles_empty_masks(self) -> None:
+        latents = torch.randn(2, 3, 4, 5)
+        mask = torch.zeros(2, 3, 4)
+        loss = sketched_isotropic_gaussian_regularizer(latents, mask)
+        self.assertTrue(torch.isfinite(loss))
+        self.assertEqual(float(loss), 0.0)
 
 
 if __name__ == "__main__":

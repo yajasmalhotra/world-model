@@ -93,13 +93,15 @@ def latest_jepa_checkpoint() -> Optional[str]:
     return str((ema_candidates or candidates)[-1])
 
 
-def load_image_encoder(config: Dict, device: torch.device, ckpt_path: str) -> ImageToBeliefEncoder3D:
+def load_image_encoder(config: Dict, device: torch.device, ckpt_path: str) -> tuple[ImageToBeliefEncoder3D, bool]:
     ckpt = load_checkpoint(ckpt_path, device)
     ckpt_config = ckpt.get("config", config)
     model_cfg = ckpt_config["model3d"]
     data_cfg = ckpt_config["data3d"]
+    rgbd = bool(ckpt.get("rgbd", False))
     model = ImageToBeliefEncoder3D(
         max_objects=int(model_cfg["max_objects"]),
+        input_channels=4 if rgbd else 3,
         cnn_dim=int(model_cfg["encoder_cnn_dim"]),
         rnn_dim=int(model_cfg["encoder_rnn_dim"]),
         world_min=float(data_cfg["world_min"]),
@@ -110,7 +112,7 @@ def load_image_encoder(config: Dict, device: torch.device, ckpt_path: str) -> Im
     ).to(device)
     model.load_state_dict(ckpt["model_state"], strict=False)
     model.eval()
-    return model
+    return model, rgbd
 
 
 def load_belief_jepa(config: Dict, device: torch.device, ckpt_path: str) -> tuple[BeliefJEPA3D, bool, bool]:
@@ -610,6 +612,7 @@ def build_demo_for_seed(
     mode: str,
     image_encoder: Optional[ImageToBeliefEncoder3D] = None,
     image_encoder_ckpt: Optional[str] = None,
+    image_encoder_rgbd: bool = False,
     belief_jepa: Optional[BeliefJEPA3D] = None,
     belief_jepa_ckpt: Optional[str] = None,
     jepa_rgbd: bool = False,
@@ -674,7 +677,7 @@ def build_demo_for_seed(
 
     if mode == "compare_all" and image_encoder is not None:
         with torch.no_grad():
-            image_outputs = image_encoder(sample_context_tensor(sample, obs_len, device, rgbd=False))
+            image_outputs = image_encoder(sample_context_tensor(sample, obs_len, device, rgbd=image_encoder_rgbd))
             image_particles, image_weights = rollout_particle_belief_from_gaussian(
                 image_outputs["mean"],
                 image_outputs["log_std"],
@@ -803,6 +806,14 @@ def build_demo_for_seed(
     if mode == "compare_all":
         requested_methods.extend(["image", "jepa"])
     method_metadata = {}
+
+    def method_rgbd_flag(method: str) -> Optional[bool]:
+        if method == "image":
+            return bool(image_encoder_rgbd)
+        if method == "jepa":
+            return bool(jepa_rgbd)
+        return None
+
     for method in requested_methods:
         trace = traces.get(method)
         if trace is None:
@@ -811,6 +822,7 @@ def build_demo_for_seed(
                 "label": METHOD_LABELS[method],
                 "available": False,
                 "checkpoint": checkpoint,
+                "rgbd": method_rgbd_flag(method),
                 "mean_expected_distance": None,
                 "mean_surprise": None,
                 "mean_entropy": None,
@@ -824,6 +836,7 @@ def build_demo_for_seed(
             "label": trace["label"],
             "available": True,
             "checkpoint": trace["checkpoint"],
+            "rgbd": method_rgbd_flag(method),
             "mean_expected_distance": finite_mean(trace_metrics["expected_distance"]),
             "mean_surprise": finite_mean(trace_metrics["surprise"]),
             "mean_entropy": finite_mean(trace_metrics["entropy"]),
@@ -844,6 +857,8 @@ def build_demo_for_seed(
         "target": target_metadata,
         "metrics": metrics,
         "comparison_metrics": comparison,
+        "phase_timeline": metrics.get("phase", []),
+        "phase_labels": list(dict.fromkeys(metrics.get("phase", []))),
         "method_metadata": method_metadata,
         "jepa_ema_enabled": bool(jepa_ema_enabled) if "jepa" in traces else None,
         "artifacts": {
@@ -872,17 +887,19 @@ def main() -> None:
     scene_cfg = scene3d_config_from_data_cfg(config["data3d"])
     output_dir = Path(args.output_dir)
     image_encoder = None
+    image_encoder_rgbd = False
     belief_jepa = None
     jepa_rgbd = False
     jepa_ema_enabled = False
     if args.mode == "compare_all":
         if args.encoder_ckpt is None:
-            args.encoder_ckpt = latest_checkpoint("*_train_belief3d_encoder/checkpoints/best.pt")
+            args.encoder_ckpt = latest_checkpoint("*_train_belief3d_encoder*/checkpoints/best.pt")
         if args.jepa_ckpt is None:
             args.jepa_ckpt = latest_jepa_checkpoint()
         if args.encoder_ckpt is not None:
-            image_encoder = load_image_encoder(config, device, args.encoder_ckpt)
-            print(f"Loaded image-to-belief checkpoint: {args.encoder_ckpt}")
+            image_encoder, image_encoder_rgbd = load_image_encoder(config, device, args.encoder_ckpt)
+            modality = "RGB-D" if image_encoder_rgbd else "RGB"
+            print(f"Loaded {modality} image-to-belief checkpoint: {args.encoder_ckpt}")
         else:
             print("No image-to-belief checkpoint found; compare_all will skip image mode.")
         if args.jepa_ckpt is not None:
@@ -904,6 +921,7 @@ def main() -> None:
             mode=args.mode,
             image_encoder=image_encoder,
             image_encoder_ckpt=args.encoder_ckpt,
+            image_encoder_rgbd=image_encoder_rgbd,
             belief_jepa=belief_jepa,
             belief_jepa_ckpt=args.jepa_ckpt,
             jepa_rgbd=jepa_rgbd,

@@ -63,11 +63,15 @@ def latest_jepa_checkpoint() -> Optional[str]:
     return str((ema_candidates or candidates)[-1])
 
 
-def load_image_encoder(config: Dict, device: torch.device, ckpt_path: Optional[str]) -> ImageToBeliefEncoder3D:
-    model_cfg = config["model3d"]
-    data_cfg = config["data3d"]
+def load_image_encoder(config: Dict, device: torch.device, ckpt_path: Optional[str]) -> tuple[ImageToBeliefEncoder3D, bool]:
+    ckpt = load_checkpoint(ckpt_path, device) if ckpt_path else None
+    ckpt_config = ckpt.get("config", config) if ckpt else config
+    model_cfg = ckpt_config["model3d"]
+    data_cfg = ckpt_config["data3d"]
+    rgbd = bool(ckpt.get("rgbd", False)) if ckpt else False
     model = ImageToBeliefEncoder3D(
         max_objects=int(model_cfg["max_objects"]),
+        input_channels=4 if rgbd else 3,
         cnn_dim=int(model_cfg["encoder_cnn_dim"]),
         rnn_dim=int(model_cfg["encoder_rnn_dim"]),
         world_min=float(data_cfg["world_min"]),
@@ -76,10 +80,9 @@ def load_image_encoder(config: Dict, device: torch.device, ckpt_path: Optional[s
         min_log_std=float(model_cfg["min_log_std"]),
         max_log_std=float(model_cfg["max_log_std"]),
     ).to(device)
-    if ckpt_path:
-        ckpt = load_checkpoint(ckpt_path, device)
+    if ckpt:
         model.load_state_dict(ckpt["model_state"], strict=False)
-    return model
+    return model, rgbd
 
 
 def load_belief_jepa(config: Dict, device: torch.device, ckpt_path: str) -> tuple[BeliefJEPA3D, bool, bool]:
@@ -160,6 +163,7 @@ def evaluate_split(
     device: torch.device,
     mode: str,
     encoder: Optional[ImageToBeliefEncoder3D] = None,
+    image_rgbd: bool = False,
     jepa: Optional[BeliefJEPA3D] = None,
     jepa_rgbd: bool = False,
     jepa_ema_enabled: bool = False,
@@ -174,7 +178,6 @@ def evaluate_split(
         jepa.eval()
 
     for batch_idx, batch in enumerate(loader):
-        obs_frames = batch["obs_frames"].to(device)
         obs_state = batch["obs_state"].to(device)
         future_state = batch["future_state"].to(device)
         obs_mask = batch["obs_mask"].to(device)
@@ -185,7 +188,7 @@ def evaluate_split(
         if mode == "image":
             if encoder is None:
                 raise RuntimeError("Image mode requires an encoder checkpoint.")
-            outputs = encoder(obs_frames)
+            outputs = encoder(context_frames(batch, device, image_rgbd))
             particles, weights = rollout_particle_belief_from_gaussian(
                 outputs["mean"],
                 outputs["log_std"],
@@ -333,7 +336,7 @@ def main() -> None:
     set_seed(int(config["project"]["seed"]))
     device = get_device(config["project"].get("device", "auto"))
     if args.mode in ("image", "all") and args.encoder_ckpt is None:
-        args.encoder_ckpt = latest_checkpoint("*_train_belief3d_encoder/checkpoints/best.pt")
+        args.encoder_ckpt = latest_checkpoint("*_train_belief3d_encoder*/checkpoints/best.pt")
     if args.mode in ("jepa", "all") and args.jepa_ckpt is None:
         args.jepa_ckpt = latest_jepa_checkpoint()
     manifest_dir = Path(config["data3d"]["manifest_dir"])
@@ -345,14 +348,15 @@ def main() -> None:
         "run_type": "evaluate_belief3d",
         "device": str(device),
         "encoder_checkpoint": args.encoder_ckpt,
+        "encoder_rgbd": False,
         "jepa_checkpoint": args.jepa_ckpt,
         "splits": {},
     }
-    image_encoder = (
-        load_image_encoder(config, device, args.encoder_ckpt)
-        if args.mode in ("image", "all") and args.encoder_ckpt is not None
-        else None
-    )
+    image_encoder: Optional[ImageToBeliefEncoder3D] = None
+    image_rgbd = False
+    if args.mode in ("image", "all") and args.encoder_ckpt is not None:
+        image_encoder, image_rgbd = load_image_encoder(config, device, args.encoder_ckpt)
+        summary["encoder_rgbd"] = bool(image_rgbd)
     belief_jepa: Optional[BeliefJEPA3D] = None
     jepa_rgbd = False
     jepa_ema_enabled = False
@@ -381,7 +385,8 @@ def main() -> None:
             if image_encoder is None:
                 print("Skipping image mode because no encoder checkpoint was found.")
             else:
-                metrics = evaluate_split(loader, config, device, mode="image", encoder=image_encoder)
+                metrics = evaluate_split(loader, config, device, mode="image", encoder=image_encoder, image_rgbd=image_rgbd)
+                metrics["image_rgbd"] = float(image_rgbd)
                 row = {"split": split, "mode": "image_to_belief", **metrics}
                 append_metrics(run_dir, row)
                 summary["splits"][f"image::{split}"] = metrics

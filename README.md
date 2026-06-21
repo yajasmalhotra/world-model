@@ -117,13 +117,19 @@ python scripts/train_belief_jepa3d.py --config configs/belief3d_smoke.yaml
 python scripts/evaluate_belief3d.py --config configs/belief3d_smoke.yaml --mode all
 ```
 
+Train the supervised image-to-belief baseline with RGB-D context:
+
+```bash
+python scripts/train_belief3d.py --config configs/belief3d_smoke.yaml --rgbd
+```
+
 Belief-JEPA training uses an EMA target encoder by default. For an ablation:
 
 ```bash
 python scripts/train_belief_jepa3d.py --config configs/belief3d_smoke.yaml --no-ema
 ```
 
-The JEPA run logs latent diagnostics including `latent_mse`, `target_recon_mse`, `pred_target_cosine`, `target_latent_std`, `pred_latent_std`, and `ema_online_drift`; evaluation adds `jepa_*` diagnostics while keeping predictions context-only.
+The JEPA run logs latent diagnostics including `latent_mse`, `target_recon_mse`, `pred_target_cosine`, `target_latent_std`, `pred_latent_std`, and `ema_online_drift`; evaluation adds `jepa_*` diagnostics while keeping predictions context-only. Belief-JEPA also includes a lightweight LeJEPA-inspired sketched Gaussian latent regularizer via `sigreg_weight`, `sigreg_sketches`, and `sigreg_scale`; set `sigreg_weight: 0.0` for ablation.
 
 `evaluate_belief3d.py --mode all` compares:
 
@@ -186,7 +192,7 @@ The 3D generator distinguishes visual occluders, physical obstacles, and solid s
 
 This path is additive and does not modify the original 2D training pipeline.
 
-3D batches also expose `obs_depth` and `future_depth` tensors for future RGB-D or depth-supervised experiments. Current training scripts continue to use RGB `obs_frames`, so the extra depth channel is available without changing the existing MVP training loop.
+3D batches expose `obs_depth` and `future_depth` tensors. The supervised image-to-belief and Belief-JEPA training scripts can use RGB-D context via `--rgbd`, while the default RGB path remains unchanged.
 
 ## Storage Hygiene
 

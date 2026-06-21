@@ -6,13 +6,14 @@ import torch.nn as nn
 
 class ImageToBeliefEncoder3D(nn.Module):
     """
-    Small supervised encoder from observed RGB frames to per-slot Gaussian
+    Small supervised encoder from observed RGB or RGB-D frames to per-slot Gaussian
     belief parameters for final observed 3D position and velocity.
     """
 
     def __init__(
         self,
         max_objects: int = 5,
+        input_channels: int = 3,
         cnn_dim: int = 96,
         rnn_dim: int = 128,
         world_min: float = -1.0,
@@ -23,6 +24,7 @@ class ImageToBeliefEncoder3D(nn.Module):
     ):
         super().__init__()
         self.max_objects = max_objects
+        self.input_channels = int(input_channels)
         self.world_min = float(world_min)
         self.world_max = float(world_max)
         self.velocity_limit = float(velocity_limit)
@@ -30,7 +32,7 @@ class ImageToBeliefEncoder3D(nn.Module):
         self.max_log_std = float(max_log_std)
 
         self.frame_encoder = nn.Sequential(
-            nn.Conv2d(3, 32, kernel_size=5, stride=2, padding=2),
+            nn.Conv2d(self.input_channels, 32, kernel_size=5, stride=2, padding=2),
             nn.ReLU(),
             nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),
             nn.ReLU(),

@@ -59,11 +59,14 @@ def build_model(config: Dict, device: torch.device, rgbd: bool) -> BeliefJEPA3D:
     ).to(device)
 
 
-def loss_weights(train_cfg: Dict) -> Dict[str, float]:
+def loss_weights(train_cfg: Dict) -> Dict[str, float | int]:
     return {
         "latent_weight": float(train_cfg.get("latent_weight", 1.0)),
         "belief_weight": float(train_cfg.get("belief_weight", 0.5)),
         "target_recon_weight": float(train_cfg.get("target_recon_weight", 0.1)),
+        "sigreg_weight": float(train_cfg.get("sigreg_weight", 0.0)),
+        "sigreg_sketches": int(train_cfg.get("sigreg_sketches", 16)),
+        "sigreg_scale": float(train_cfg.get("sigreg_scale", 1.0)),
     }
 
 
@@ -115,6 +118,7 @@ def main() -> None:
     ema_enabled = not bool(args.no_ema)
     ema_decay = float(train_cfg.get("ema_decay", 0.99))
     ema_update_after_step = int(train_cfg.get("ema_update_after_step", 0))
+    loss_cfg = loss_weights(train_cfg)
     manifest_dir = Path(data_cfg["manifest_dir"])
     batch_size = int(data_cfg.get("batch_size", config["eval"].get("batch_size", 8)))
 
@@ -145,7 +149,7 @@ def main() -> None:
             future_state = batch["future_state"].to(device)
             future_mask = batch["future_mask"].to(device)
             outputs = model(frames, future_state=future_state, use_ema_target=ema_enabled)
-            losses = belief_jepa_loss(outputs, future_state, future_mask, **loss_weights(train_cfg))
+            losses = belief_jepa_loss(outputs, future_state, future_mask, **loss_cfg)
             optimizer.zero_grad()
             losses["total"].backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
@@ -163,6 +167,9 @@ def main() -> None:
             "epoch": epoch,
             "ema_enabled": float(ema_enabled),
             "ema_decay": ema_decay,
+            "sigreg_weight": float(loss_cfg["sigreg_weight"]),
+            "sigreg_sketches": float(loss_cfg["sigreg_sketches"]),
+            "sigreg_scale": float(loss_cfg["sigreg_scale"]),
             "global_step": float(global_step),
             "train_loss": train_metrics.get("total", math.nan),
             **train_metrics,
@@ -183,6 +190,9 @@ def main() -> None:
                     "rgbd": bool(args.rgbd),
                     "ema_enabled": bool(ema_enabled),
                     "ema_decay": ema_decay,
+                    "sigreg_weight": float(loss_cfg["sigreg_weight"]),
+                    "sigreg_sketches": int(loss_cfg["sigreg_sketches"]),
+                    "sigreg_scale": float(loss_cfg["sigreg_scale"]),
                 },
             )
 
@@ -197,6 +207,9 @@ def main() -> None:
             "ema_enabled": bool(ema_enabled),
             "ema_decay": ema_decay,
             "ema_update_after_step": ema_update_after_step,
+            "sigreg_weight": float(loss_cfg["sigreg_weight"]),
+            "sigreg_sketches": int(loss_cfg["sigreg_sketches"]),
+            "sigreg_scale": float(loss_cfg["sigreg_scale"]),
         },
     )
     print(f"Done. Best checkpoint: {best_ckpt}")
