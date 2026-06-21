@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import math
 import sys
 from pathlib import Path
@@ -25,6 +26,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", type=str, default="configs/belief3d_smoke.yaml")
     parser.add_argument("--rgbd", action="store_true", help="Use RGB-D context frames instead of RGB only.")
     parser.add_argument("--no-ema", action="store_true", help="Use online target latents as a no-EMA ablation.")
+    parser.add_argument("--sigreg-weight", type=float, default=None, help="Override train_belief3d.sigreg_weight.")
+    parser.add_argument("--sigreg-sketches", type=int, default=None, help="Override train_belief3d.sigreg_sketches.")
+    parser.add_argument("--sigreg-scale", type=float, default=None, help="Override train_belief3d.sigreg_scale.")
     return parser.parse_args()
 
 
@@ -70,6 +74,18 @@ def loss_weights(train_cfg: Dict) -> Dict[str, float | int]:
     }
 
 
+def apply_cli_overrides(config: Dict, args: argparse.Namespace) -> Dict:
+    updated = copy.deepcopy(config)
+    train_cfg = updated["train_belief3d"]
+    if args.sigreg_weight is not None:
+        train_cfg["sigreg_weight"] = float(args.sigreg_weight)
+    if args.sigreg_sketches is not None:
+        train_cfg["sigreg_sketches"] = int(args.sigreg_sketches)
+    if args.sigreg_scale is not None:
+        train_cfg["sigreg_scale"] = float(args.sigreg_scale)
+    return updated
+
+
 def scalar_losses(losses: Dict[str, torch.Tensor]) -> Dict[str, float]:
     return {key: float(value.detach().cpu().item()) for key, value in losses.items()}
 
@@ -110,7 +126,7 @@ def evaluate_val(
 
 def main() -> None:
     args = parse_args()
-    config = load_config(args.config)
+    config = apply_cli_overrides(load_config(args.config), args)
     set_seed(int(config["project"]["seed"]))
     device = get_device(config["project"].get("device", "auto"))
     data_cfg = config["data3d"]
@@ -136,6 +152,8 @@ def main() -> None:
     run_name = "train_belief_jepa3d_rgbd" if args.rgbd else "train_belief_jepa3d"
     if not ema_enabled:
         run_name = f"{run_name}_noema"
+    if float(loss_cfg["sigreg_weight"]) <= 0.0:
+        run_name = f"{run_name}_nosigreg"
     run_dir = init_run_dir(config["project"]["output_root"], run_name, config)
     best_metric = math.inf
     best_ckpt = run_dir / "checkpoints" / "best.pt"

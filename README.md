@@ -127,9 +127,16 @@ Belief-JEPA training uses an EMA target encoder by default. For an ablation:
 
 ```bash
 python scripts/train_belief_jepa3d.py --config configs/belief3d_smoke.yaml --no-ema
+python scripts/train_belief_jepa3d.py --config configs/belief3d_smoke.yaml --sigreg-weight 0.0
 ```
 
 The JEPA run logs latent diagnostics including `latent_mse`, `target_recon_mse`, `pred_target_cosine`, `target_latent_std`, `pred_latent_std`, and `ema_online_drift`; evaluation adds `jepa_*` diagnostics while keeping predictions context-only. Belief-JEPA also includes a lightweight LeJEPA-inspired sketched Gaussian latent regularizer via `sigreg_weight`, `sigreg_sketches`, and `sigreg_scale`; set `sigreg_weight: 0.0` for ablation.
+
+Write an EMA/SIGReg ablation table from the latest JEPA checkpoints:
+
+```bash
+python scripts/report_belief_jepa3d_ablation.py --config configs/belief3d_smoke.yaml
+```
 
 `evaluate_belief3d.py --mode all` compares:
 

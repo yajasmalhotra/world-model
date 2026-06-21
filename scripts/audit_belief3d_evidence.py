@@ -77,6 +77,11 @@ def parse_args() -> argparse.Namespace:
         default="results/belief3d_demo_impossible/seed_2026_belief3d_metrics.json",
     )
     parser.add_argument("--report-json", type=str, default="results/belief3d_report/belief3d_report.json")
+    parser.add_argument(
+        "--jepa-ablation-json",
+        type=str,
+        default="results/belief_jepa3d_ablation/belief_jepa3d_ablation.json",
+    )
     parser.add_argument("--output-dir", type=str, default="results/belief3d_audit")
     parser.add_argument("--sample-count", type=int, default=3, help="Targeted manifest rows to regenerate per split.")
     return parser.parse_args()
@@ -346,6 +351,58 @@ def audit_report(report_json_path: Path) -> List[Check]:
     return checks
 
 
+def audit_jepa_ablation(ablation_json_path: Path) -> List[Check]:
+    checks: List[Check] = []
+    if not ablation_json_path.is_absolute():
+        ablation_json_path = ROOT / ablation_json_path
+    if not ablation_json_path.exists():
+        return [fail_check("jepa_ablation.json", f"Missing {ablation_json_path}")]
+    report = load_json(ablation_json_path)
+    rows = report.get("rows", [])
+    claims = report.get("claims", {})
+    checks.append(pass_check("jepa_ablation.json", f"Loaded {ablation_json_path}."))
+
+    variants = {str(row.get("variant")) for row in rows if row.get("variant") is not None}
+    if len(variants) >= 2:
+        checks.append(pass_check("jepa_ablation.variants", f"Compared {len(variants)} variants: {sorted(variants)}."))
+    else:
+        checks.append(fail_check("jepa_ablation.variants", f"Need at least two variants, found {sorted(variants)}."))
+
+    has_anchor = any(bool(row.get("ema_enabled")) and is_finite_number(row.get("sigreg_weight")) and float(row["sigreg_weight"]) > 0.0 for row in rows)
+    has_ablation = any(
+        (not bool(row.get("ema_enabled")))
+        or (is_finite_number(row.get("sigreg_weight")) and float(row["sigreg_weight"]) <= 0.0)
+        for row in rows
+    )
+    if has_anchor and has_ablation:
+        checks.append(pass_check("jepa_ablation.anchor_and_ablation", "Includes EMA+SIGReg anchor and at least one ablation."))
+    else:
+        checks.append(
+            fail_check(
+                "jepa_ablation.anchor_and_ablation",
+                f"Missing anchor or ablation: has_anchor={has_anchor}, has_ablation={has_ablation}.",
+            )
+        )
+
+    required_metrics = {
+        "target_hidden_expected_distance",
+        "target_reappearance_surprise",
+        "jepa_latent_mse",
+        "jepa_pred_target_cosine",
+    }
+    if rows and all(any(metric in row and is_finite_number(row.get(metric)) for row in rows) for metric in required_metrics):
+        checks.append(pass_check("jepa_ablation.metrics", "Targeted belief and latent metrics are present."))
+    else:
+        checks.append(fail_check("jepa_ablation.metrics", f"Missing one of {sorted(required_metrics)}."))
+
+    comparisons = claims.get("comparisons", [])
+    if isinstance(comparisons, list) and comparisons:
+        checks.append(pass_check("jepa_ablation.comparisons", f"{len(comparisons)} EMA+SIGReg comparison rows."))
+    else:
+        checks.append(fail_check("jepa_ablation.comparisons", f"No comparison rows in claims: {claims}"))
+    return checks
+
+
 def summarize_checks(checks: List[Check]) -> Dict[str, Any]:
     counts = {"pass": 0, "warn": 0, "fail": 0}
     for check in checks:
@@ -400,6 +457,7 @@ def main() -> None:
         )
     )
     checks.extend(audit_report(Path(args.report_json)))
+    checks.extend(audit_jepa_ablation(Path(args.jepa_ablation_json)))
     summary = summarize_checks(checks)
     artifacts = write_outputs(summary, Path(args.output_dir))
     print(json.dumps({"status": summary["status"], "counts": summary["counts"], "artifacts": artifacts}, indent=2))
