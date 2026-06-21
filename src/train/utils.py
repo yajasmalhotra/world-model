@@ -95,4 +95,7 @@ def save_checkpoint(path: str | Path, state: Dict[str, Any]) -> None:
 
 
 def load_checkpoint(path: str | Path, device: torch.device) -> Dict[str, Any]:
-    return torch.load(Path(path), map_location=device)
+    try:
+        return torch.load(Path(path), map_location=device, weights_only=False)
+    except TypeError:
+        return torch.load(Path(path), map_location=device)

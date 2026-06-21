@@ -5,7 +5,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Dict, Iterable, List
+from typing import Dict, Iterable, List, Optional
 
 import imageio.v2 as imageio
 import numpy as np
@@ -18,8 +18,17 @@ if str(ROOT) not in sys.path:
 
 from src.data3d.dataset3d import scene3d_config_from_data_cfg
 from src.data3d.scene_generator3d import STATE_INDEX_3D, Scene3DConfig, SyntheticScene3DGenerator
-from src.models.belief_state import ParticleBeliefConfig, initialize_particles, rollout_geometry_aware_particle_belief, rollout_particle_belief
-from src.train.utils import get_device, load_config, set_seed
+from src.models.belief_encoder3d import ImageToBeliefEncoder3D
+from src.models.belief_jepa3d import BeliefJEPA3D
+from src.models.belief_state import (
+    ParticleBeliefConfig,
+    initialize_particles,
+    particles_from_gaussian_sequence,
+    rollout_geometry_aware_particle_belief,
+    rollout_particle_belief,
+    rollout_particle_belief_from_gaussian,
+)
+from src.train.utils import get_device, load_checkpoint, load_config, set_seed
 
 
 RGB_YELLOW = (250, 204, 21)
@@ -30,6 +39,19 @@ RGB_DARK = (17, 24, 39)
 RGB_PANEL = (248, 250, 252)
 RGB_GRID = (203, 213, 225)
 RGB_ORANGE = (249, 115, 22)
+
+METHOD_LABELS = {
+    "constant": "constant velocity",
+    "geometry": "geometry aware",
+    "image": "image to belief",
+    "jepa": "Belief-JEPA",
+}
+METHOD_SHORT_LABELS = {
+    "constant": "constant",
+    "geometry": "geometry",
+    "image": "image",
+    "jepa": "JEPA",
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -46,8 +68,83 @@ def parse_args() -> argparse.Namespace:
         default="structured_occlusion",
         choices=["random", "targeted_occlusion", "structured_occlusion", "impossible_reappearance"],
     )
-    parser.add_argument("--mode", type=str, default="compare", choices=["constant", "geometry", "compare"])
+    parser.add_argument("--mode", type=str, default="compare", choices=["constant", "geometry", "compare", "compare_all"])
+    parser.add_argument("--encoder-ckpt", type=str, default=None, help="Optional image-to-belief checkpoint for compare_all.")
+    parser.add_argument("--jepa-ckpt", type=str, default=None, help="Optional Belief-JEPA checkpoint for compare_all.")
     return parser.parse_args()
+
+
+def latest_checkpoint(pattern: str) -> Optional[str]:
+    candidates = sorted(Path("runs").glob(pattern))
+    if not candidates:
+        return None
+    return str(candidates[-1])
+
+
+def latest_jepa_checkpoint() -> Optional[str]:
+    candidates = sorted(Path("runs").glob("*_train_belief_jepa3d*/checkpoints/best.pt"))
+    if not candidates:
+        return None
+    ema_candidates = [path for path in candidates if "noema" not in str(path)]
+    return str((ema_candidates or candidates)[-1])
+
+
+def load_image_encoder(config: Dict, device: torch.device, ckpt_path: str) -> ImageToBeliefEncoder3D:
+    ckpt = load_checkpoint(ckpt_path, device)
+    ckpt_config = ckpt.get("config", config)
+    model_cfg = ckpt_config["model3d"]
+    data_cfg = ckpt_config["data3d"]
+    model = ImageToBeliefEncoder3D(
+        max_objects=int(model_cfg["max_objects"]),
+        cnn_dim=int(model_cfg["encoder_cnn_dim"]),
+        rnn_dim=int(model_cfg["encoder_rnn_dim"]),
+        world_min=float(data_cfg["world_min"]),
+        world_max=float(data_cfg["world_max"]),
+        velocity_limit=float(model_cfg["velocity_limit"]),
+        min_log_std=float(model_cfg["min_log_std"]),
+        max_log_std=float(model_cfg["max_log_std"]),
+    ).to(device)
+    model.load_state_dict(ckpt["model_state"], strict=False)
+    model.eval()
+    return model
+
+
+def load_belief_jepa(config: Dict, device: torch.device, ckpt_path: str) -> tuple[BeliefJEPA3D, bool, bool]:
+    ckpt = load_checkpoint(ckpt_path, device)
+    ckpt_config = ckpt.get("config", config)
+    model_cfg = ckpt_config["model3d"]
+    data_cfg = ckpt_config["data3d"]
+    rgbd = bool(ckpt.get("rgbd", False))
+    ema_enabled = bool(ckpt.get("ema_enabled", False))
+    horizon = max(int(data_cfg["seq_len"]), int(data_cfg["obs_len"]) + 14, 24) - int(data_cfg["obs_len"])
+    model = BeliefJEPA3D(
+        max_objects=int(model_cfg["max_objects"]),
+        horizon=horizon,
+        input_channels=4 if rgbd else 3,
+        cnn_dim=int(model_cfg["encoder_cnn_dim"]),
+        rnn_dim=int(model_cfg["encoder_rnn_dim"]),
+        latent_dim=int(model_cfg.get("jepa_latent_dim", 64)),
+        world_min=float(data_cfg["world_min"]),
+        world_max=float(data_cfg["world_max"]),
+        velocity_limit=float(model_cfg["velocity_limit"]),
+        min_log_std=float(model_cfg["min_log_std"]),
+        max_log_std=float(model_cfg.get("jepa_max_log_std", -0.8)),
+    ).to(device)
+    incompatible = model.load_state_dict(ckpt["model_state"], strict=False)
+    if any(key.startswith("ema_target_encoder.") for key in incompatible.missing_keys):
+        model.sync_ema_target_encoder()
+    model.eval()
+    return model, rgbd, ema_enabled
+
+
+def sample_context_tensor(sample: Dict[str, np.ndarray], obs_len: int, device: torch.device, rgbd: bool) -> torch.Tensor:
+    frames = torch.from_numpy(sample["frames"][:obs_len].astype(np.float32) / 255.0)
+    frames = frames.permute(0, 3, 1, 2).unsqueeze(0).contiguous().to(device)
+    if not rgbd:
+        return frames
+    depth = torch.from_numpy(sample["depth"][:obs_len].astype(np.float32))
+    depth = depth.unsqueeze(1).unsqueeze(0).contiguous().to(device)
+    return torch.cat([frames, depth], dim=2)
 
 
 def project_points(points: np.ndarray, cfg: Scene3DConfig) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -273,7 +370,8 @@ def draw_metric_panel(
         draw.text((8, y), f"{label}: {value:.3f}" if value == value else f"{label}: n/a", fill=RGB_DARK, font=font)
         plot_x0 = 86
         plot_y0 = y + 2
-        plot_w = width - plot_x0 - 10
+        compare_w = 220 if comparison else 0
+        plot_w = max(80, width - plot_x0 - compare_w - 16)
         plot_h = 13
         draw.rectangle([plot_x0, plot_y0, plot_x0 + plot_w, plot_y0 + plot_h], outline=(226, 232, 240))
         if valid.size >= 2:
@@ -288,16 +386,15 @@ def draw_metric_panel(
                 draw.line(pts, fill=color, width=2)
         y += 22
     if comparison:
-        constant = comparison["constant"]["expected_distance"][frame_idx]
-        geometry = comparison["geometry"]["expected_distance"][frame_idx]
-        label = "dist constant/geometry"
-        value = (
-            f"{constant:.3f} / {geometry:.3f}"
-            if np.isfinite(constant) and np.isfinite(geometry)
-            else "n/a"
-        )
-        draw.text((width - 190, 8), label, fill=RGB_DARK, font=font)
-        draw.text((width - 190, 22), value, fill=RGB_BLUE, font=font)
+        draw.text((width - 220, 8), "expected distance", fill=RGB_DARK, font=font)
+        y_cmp = 22
+        for method in ("constant", "geometry", "image", "jepa"):
+            if method not in comparison:
+                continue
+            value = comparison[method]["expected_distance"][frame_idx]
+            text_value = f"{float(value):.3f}" if np.isfinite(value) else "n/a"
+            draw.text((width - 220, y_cmp), f"{METHOD_SHORT_LABELS[method]}: {text_value}", fill=RGB_BLUE, font=font)
+            y_cmp += 13
     phase = metrics["phase"][frame_idx]
     draw.text((8, height - 18), f"phase: {phase}", fill=RGB_ORANGE if phase == "hidden rollout" else RGB_DARK, font=font)
     return np.asarray(image)
@@ -404,6 +501,27 @@ def combine_metrics(prefix: Dict[str, List[float]], rollout: Dict[str, List[floa
     return combined
 
 
+def finite_mean(values: List[float]) -> float:
+    finite = [float(value) for value in values if np.isfinite(value)]
+    if not finite:
+        return float("inf")
+    return float(sum(finite) / len(finite))
+
+
+def choose_primary_trace(comparison: Dict[str, Dict[str, List[float]]], fallback: str = "geometry") -> str:
+    if not comparison:
+        return fallback
+    scores = []
+    for method, method_metrics in comparison.items():
+        scores.append((finite_mean(method_metrics.get("expected_distance", [])), method))
+    scores.sort(key=lambda item: (item[0], item[1]))
+    if scores and np.isfinite(scores[0][0]):
+        return scores[0][1]
+    if fallback in comparison:
+        return fallback
+    return next(iter(comparison.keys()))
+
+
 def build_demo_for_seed(
     seed: int,
     config: Dict,
@@ -415,6 +533,12 @@ def build_demo_for_seed(
     panel_scale: int,
     scenario: str,
     mode: str,
+    image_encoder: Optional[ImageToBeliefEncoder3D] = None,
+    image_encoder_ckpt: Optional[str] = None,
+    belief_jepa: Optional[BeliefJEPA3D] = None,
+    belief_jepa_ckpt: Optional[str] = None,
+    jepa_rgbd: bool = False,
+    jepa_ema_enabled: bool = False,
 ) -> None:
     generator = SyntheticScene3DGenerator(scene_cfg)
     overrides = demo_overrides(scene_cfg, scenario)
@@ -444,50 +568,91 @@ def build_demo_for_seed(
     constant_weights_np = constant_weights.squeeze(0).detach().cpu().numpy()
     geometry_particles_np = geometry_particles.squeeze(0).detach().cpu().numpy()
     geometry_weights_np = geometry_weights.squeeze(0).detach().cpu().numpy()
-    if mode == "constant":
-        particles_np, weights_np = constant_particles_np, constant_weights_np
-        mode_label = "constant_velocity_particle_belief"
-    else:
-        particles_np, weights_np = geometry_particles_np, geometry_weights_np
-        mode_label = "geometry_aware_particle_belief" if mode == "geometry" else "constant_vs_geometry_particle_belief"
+    traces: Dict[str, Dict[str, object]] = {}
 
-    rollout_metrics = per_frame_metrics(
-        particles=particles_np,
-        weights=weights_np,
-        true_state=future_state,
-        obj_idx=focus_obj,
-        density_sigma=float(config["belief"]["density_sigma"]),
-        mass_radius=float(config["belief"]["mass_radius"]),
-    )
-    metrics = combine_metrics(visible_prefix_metrics(obs_len), rollout_metrics, obs_len=obs_len)
-    comparison = None
-    if mode == "compare":
-        comparison = {
-            "constant": combine_metrics(
-                visible_prefix_metrics(obs_len),
-                per_frame_metrics(
-                    particles=constant_particles_np,
-                    weights=constant_weights_np,
-                    true_state=future_state,
-                    obj_idx=focus_obj,
-                    density_sigma=float(config["belief"]["density_sigma"]),
-                    mass_radius=float(config["belief"]["mass_radius"]),
-                ),
-                obs_len=obs_len,
-            ),
-            "geometry": combine_metrics(
-                visible_prefix_metrics(obs_len),
-                per_frame_metrics(
-                    particles=geometry_particles_np,
-                    weights=geometry_weights_np,
-                    true_state=future_state,
-                    obj_idx=focus_obj,
-                    density_sigma=float(config["belief"]["density_sigma"]),
-                    mass_radius=float(config["belief"]["mass_radius"]),
-                ),
-                obs_len=obs_len,
-            ),
+    def add_trace(method: str, particles: np.ndarray, weights: np.ndarray, checkpoint: Optional[str] = None) -> None:
+        rollout_metrics = per_frame_metrics(
+            particles=particles,
+            weights=weights,
+            true_state=future_state,
+            obj_idx=focus_obj,
+            density_sigma=float(config["belief"]["density_sigma"]),
+            mass_radius=float(config["belief"]["mass_radius"]),
+        )
+        traces[method] = {
+            "label": METHOD_LABELS[method],
+            "checkpoint": checkpoint,
+            "particles": particles,
+            "weights": weights,
+            "metrics": combine_metrics(visible_prefix_metrics(obs_len), rollout_metrics, obs_len=obs_len),
         }
+
+    add_trace("constant", constant_particles_np, constant_weights_np)
+    add_trace("geometry", geometry_particles_np, geometry_weights_np)
+
+    if mode == "compare_all" and image_encoder is not None:
+        with torch.no_grad():
+            image_outputs = image_encoder(sample_context_tensor(sample, obs_len, device, rgbd=False))
+            image_particles, image_weights = rollout_particle_belief_from_gaussian(
+                image_outputs["mean"],
+                image_outputs["log_std"],
+                init_state,
+                object_mask,
+                horizon=horizon,
+                cfg=particle_cfg,
+            )
+        add_trace(
+            "image",
+            image_particles.squeeze(0).detach().cpu().numpy(),
+            image_weights.squeeze(0).detach().cpu().numpy(),
+            checkpoint=image_encoder_ckpt,
+        )
+
+    if mode == "compare_all" and belief_jepa is not None:
+        with torch.no_grad():
+            future_state_tensor = torch.from_numpy(future_state.astype(np.float32)).unsqueeze(0).to(device)
+            jepa_outputs = belief_jepa(
+                sample_context_tensor(sample, obs_len, device, rgbd=jepa_rgbd),
+                future_state=future_state_tensor,
+                use_ema_target=jepa_ema_enabled,
+                include_target_reconstruction=False,
+            )
+            steps = min(horizon, jepa_outputs["mean"].shape[1])
+            if steps == horizon:
+                jepa_particles, jepa_weights = particles_from_gaussian_sequence(
+                    jepa_outputs["mean"][:, :horizon],
+                    jepa_outputs["log_std"][:, :horizon],
+                    object_mask,
+                    cfg=particle_cfg,
+                )
+                add_trace(
+                    "jepa",
+                    jepa_particles.squeeze(0).detach().cpu().numpy(),
+                    jepa_weights.squeeze(0).detach().cpu().numpy(),
+                    checkpoint=belief_jepa_ckpt,
+                )
+
+    comparison = None
+    if mode in ("compare", "compare_all"):
+        comparison = {method: trace["metrics"] for method, trace in traces.items()}
+
+    if mode == "constant":
+        primary_method = "constant"
+    elif mode == "geometry":
+        primary_method = "geometry"
+    elif mode == "compare_all":
+        primary_method = choose_primary_trace(comparison or {}, fallback="geometry")
+    else:
+        primary_method = "geometry"
+    particles_np = traces[primary_method]["particles"]
+    weights_np = traces[primary_method]["weights"]
+    metrics = traces[primary_method]["metrics"]
+    mode_label = {
+        "constant": "constant_velocity_particle_belief",
+        "geometry": "geometry_aware_particle_belief",
+        "compare": "constant_vs_geometry_particle_belief",
+        "compare_all": "constant_geometry_image_jepa_belief_comparison",
+    }[mode]
 
     frames: List[np.ndarray] = []
     total_steps = obs_len + horizon
@@ -508,7 +673,7 @@ def build_demo_for_seed(
             particle_cloud = particles_np[frame_idx - obs_len, focus_obj]
             secondary_cloud = (
                 constant_particles_np[frame_idx - obs_len, focus_obj]
-                if mode == "compare"
+                if mode in ("compare", "compare_all") and primary_method != "constant"
                 else None
             )
             show_particles = True
@@ -525,7 +690,7 @@ def build_demo_for_seed(
             show_particles=show_particles,
             secondary_particles=secondary_cloud,
         )
-        overlay_panel = make_panel(overlay, "Belief particles + truth", panel_scale)
+        overlay_panel = make_panel(overlay, f"{METHOD_SHORT_LABELS[primary_method]} belief + truth", panel_scale)
         world = draw_3d_belief_panel(
             cfg=effective_cfg,
             particles=particle_cloud,
@@ -538,22 +703,48 @@ def build_demo_for_seed(
             occluders=sample["occluders"],
             obstacles=sample["obstacles"],
         )
-        world_panel = make_panel(world, "3D belief / trajectory", panel_scale)
+        world_panel = make_panel(world, f"3D {METHOD_SHORT_LABELS[primary_method]} belief", panel_scale)
         top = hstack_with_border([rgb_panel, depth_panel, overlay_panel, world_panel])
         metrics_panel = draw_metric_panel(metrics, frame_idx, width=top.shape[1], comparison=comparison)
         frames.append(vstack([top, metrics_panel]))
 
     output_dir.mkdir(parents=True, exist_ok=True)
     gif_path = output_dir / f"seed_{seed}_belief3d.gif"
-    imageio.mimsave(gif_path, frames, fps=fps)
+    imageio.mimsave(gif_path, frames, duration=1000.0 / max(1, fps))
 
     preview_path = output_dir / f"seed_{seed}_belief3d_preview.png"
     Image.fromarray(frames[min(len(frames) - 1, max(0, len(frames) // 2))]).save(preview_path)
+
+    requested_methods = ["constant", "geometry"]
+    if mode == "compare_all":
+        requested_methods.extend(["image", "jepa"])
+    method_metadata = {}
+    for method in requested_methods:
+        trace = traces.get(method)
+        if trace is None:
+            checkpoint = image_encoder_ckpt if method == "image" else belief_jepa_ckpt if method == "jepa" else None
+            method_metadata[method] = {
+                "label": METHOD_LABELS[method],
+                "available": False,
+                "checkpoint": checkpoint,
+                "mean_expected_distance": None,
+                "primary": False,
+            }
+            continue
+        trace_metrics = trace["metrics"]
+        method_metadata[method] = {
+            "label": trace["label"],
+            "available": True,
+            "checkpoint": trace["checkpoint"],
+            "mean_expected_distance": finite_mean(trace_metrics["expected_distance"]),
+            "primary": method == primary_method,
+        }
 
     serializable = {
         "seed": seed,
         "focus_object": focus_obj,
         "mode": mode_label,
+        "primary_method": primary_method,
         "scenario": sample["metadata"]["scenario"],
         "obs_len": obs_len,
         "horizon": horizon,
@@ -561,6 +752,8 @@ def build_demo_for_seed(
         "target": target_metadata,
         "metrics": metrics,
         "comparison_metrics": comparison,
+        "method_metadata": method_metadata,
+        "jepa_ema_enabled": bool(jepa_ema_enabled) if "jepa" in traces else None,
         "artifacts": {"gif": str(gif_path), "preview": str(preview_path)},
     }
     metrics_path = output_dir / f"seed_{seed}_belief3d_metrics.json"
@@ -577,6 +770,25 @@ def main() -> None:
     device = get_device(config["project"].get("device", "auto"))
     scene_cfg = scene3d_config_from_data_cfg(config["data3d"])
     output_dir = Path(args.output_dir)
+    image_encoder = None
+    belief_jepa = None
+    jepa_rgbd = False
+    jepa_ema_enabled = False
+    if args.mode == "compare_all":
+        if args.encoder_ckpt is None:
+            args.encoder_ckpt = latest_checkpoint("*_train_belief3d_encoder/checkpoints/best.pt")
+        if args.jepa_ckpt is None:
+            args.jepa_ckpt = latest_jepa_checkpoint()
+        if args.encoder_ckpt is not None:
+            image_encoder = load_image_encoder(config, device, args.encoder_ckpt)
+            print(f"Loaded image-to-belief checkpoint: {args.encoder_ckpt}")
+        else:
+            print("No image-to-belief checkpoint found; compare_all will skip image mode.")
+        if args.jepa_ckpt is not None:
+            belief_jepa, jepa_rgbd, jepa_ema_enabled = load_belief_jepa(config, device, args.jepa_ckpt)
+            print(f"Loaded Belief-JEPA checkpoint: {args.jepa_ckpt}")
+        else:
+            print("No Belief-JEPA checkpoint found; compare_all will skip JEPA mode.")
     for seed in args.seeds:
         build_demo_for_seed(
             seed=seed,
@@ -589,6 +801,12 @@ def main() -> None:
             panel_scale=max(1, int(args.panel_scale)),
             scenario=args.scenario,
             mode=args.mode,
+            image_encoder=image_encoder,
+            image_encoder_ckpt=args.encoder_ckpt,
+            belief_jepa=belief_jepa,
+            belief_jepa_ckpt=args.jepa_ckpt,
+            jepa_rgbd=jepa_rgbd,
+            jepa_ema_enabled=jepa_ema_enabled,
         )
 
 
