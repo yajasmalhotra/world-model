@@ -140,6 +140,12 @@ Write a compact benchmark report from the latest Belief3D evaluation run:
 python scripts/report_belief3d.py --output-dir results/belief3d_report
 ```
 
+Audit the current Belief3D evidence package against the research/demo requirements:
+
+```bash
+python scripts/audit_belief3d_evidence.py --output-dir results/belief3d_audit
+```
+
 For a more meaningful local MVP run:
 
 ```bash
