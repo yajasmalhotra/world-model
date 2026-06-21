@@ -5,7 +5,8 @@
     "tags": [
       "train"
     ],
-    "overrides": {}
+    "overrides": {},
+    "target_metadata": false
   },
   "val": {
     "path": "data/manifests3d/val.jsonl",
@@ -13,7 +14,8 @@
     "tags": [
       "val"
     ],
-    "overrides": {}
+    "overrides": {},
+    "target_metadata": false
   },
   "test": {
     "path": "data/manifests3d/test.jsonl",
@@ -21,7 +23,8 @@
     "tags": [
       "test"
     ],
-    "overrides": {}
+    "overrides": {},
+    "target_metadata": false
   },
   "test_long_occlusion": {
     "path": "data/manifests3d/test_long_occlusion.jsonl",
@@ -33,7 +36,8 @@
     "overrides": {
       "seq_len": 32,
       "obs_len": 6
-    }
+    },
+    "target_metadata": false
   },
   "test_unseen_speed": {
     "path": "data/manifests3d/test_unseen_speed.jsonl",
@@ -44,7 +48,8 @@
     ],
     "overrides": {
       "velocity_scale": 0.08800000000000001
-    }
+    },
+    "target_metadata": false
   },
   "test_unseen_occluders": {
     "path": "data/manifests3d/test_unseen_occluders.jsonl",
@@ -55,7 +60,8 @@
     ],
     "overrides": {
       "occluder_layout": "edge_bias"
-    }
+    },
+    "target_metadata": false
   },
   "test_targeted_occlusion": {
     "path": "data/manifests3d/test_targeted_occlusion.jsonl",
@@ -68,7 +74,8 @@
       "scenario": "targeted_occlusion",
       "seq_len": 24,
       "obs_len": 6
-    }
+    },
+    "target_metadata": true
   },
   "test_structured_occlusion": {
     "path": "data/manifests3d/test_structured_occlusion.jsonl",
@@ -83,7 +90,8 @@
       "path_mode": "linear",
       "seq_len": 24,
       "obs_len": 6
-    }
+    },
+    "target_metadata": true
   },
   "test_impossible_reappearance": {
     "path": "data/manifests3d/test_impossible_reappearance.jsonl",
@@ -98,6 +106,7 @@
       "path_mode": "impossible_jump",
       "seq_len": 24,
       "obs_len": 6
-    }
+    },
+    "target_metadata": true
   }
 }

@@ -176,7 +176,7 @@ Include learned image-to-belief and Belief-JEPA branches when checkpoints are av
 python scripts/export_belief3d_demo_assets.py --config configs/belief3d_smoke.yaml --seeds 2026 --scenario structured_occlusion --mode compare_all
 ```
 
-The 3D generator distinguishes visual occluders, physical obstacles, and solid screens. Targeted samples write metadata including `target_object_index`, `scenario`, `path_mode`, `occlusion_start`, `occlusion_end`, `reappearance_frame`, `hidden_frames`, `obstacle_ids`, `occluder_ids`, `collision_or_turn_frames`, `valid_route_id`, and `is_impossible_event`.
+The 3D generator distinguishes visual occluders, physical obstacles, and solid screens. Targeted manifest rows store compact `target` metadata including `target_object_index`, `scenario`, `path_mode`, `occlusion_start`, `occlusion_end`, `reappearance_frame`, `hidden_frames`, `obstacle_ids`, `occluder_ids`, `collision_or_turn_frames`, `valid_route_id`, and `is_impossible_event`.
 
 This path is additive and does not modify the original 2D training pipeline.
 

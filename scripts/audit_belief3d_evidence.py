@@ -151,7 +151,31 @@ def audit_manifests(config: Dict[str, Any], sample_count: int) -> List[Check]:
         "test_impossible_reappearance": ("impossible_reappearance", True),
     }
     for split, (expected_scenario, expected_impossible) in targeted_expectations.items():
-        rows = read_manifest(manifest_dir / f"{split}.jsonl")[: max(1, int(sample_count))]
+        all_rows = read_manifest(manifest_dir / f"{split}.jsonl")
+        stored_failures = []
+        for row in all_rows:
+            target = row.get("target")
+            if not isinstance(target, dict):
+                stored_failures.append(f"{row['scene_id']} has no stored target metadata")
+                continue
+            missing_keys = sorted(TARGET_METADATA_KEYS - set(target.keys()))
+            if missing_keys:
+                stored_failures.append(f"{row['scene_id']} missing stored target keys {missing_keys}")
+            if target.get("scenario") != expected_scenario:
+                stored_failures.append(f"{row['scene_id']} stored scenario={target.get('scenario')!r}")
+            if bool(target.get("is_impossible_event")) != expected_impossible:
+                stored_failures.append(f"{row['scene_id']} stored is_impossible_event={target.get('is_impossible_event')!r}")
+        if stored_failures:
+            checks.append(fail_check(f"stored_target_metadata.{split}", "; ".join(stored_failures[:5])))
+        else:
+            checks.append(
+                pass_check(
+                    f"stored_target_metadata.{split}",
+                    f"{len(all_rows)} rows include required stored target metadata.",
+                )
+            )
+
+        rows = all_rows[: max(1, int(sample_count))]
         regenerated = []
         split_failures = []
         for row in rows:
