@@ -121,7 +121,13 @@ class Belief3DEvidenceAuditTest(unittest.TestCase):
                                 "visual_delta": 0.0,
                                 "selectivity": 0.2,
                             },
-                            "jepa": {"ema_enabled": True, "mean_latent_mse": 1.2},
+                            "jepa": {
+                                "ema_enabled": True,
+                                "mixture_enabled": True,
+                                "mean_latent_mse": 1.2,
+                                "mean_mixture_nll": 0.8,
+                                "mean_mixture_entropy": 1.0,
+                            },
                         },
                         "rows": [
                             {

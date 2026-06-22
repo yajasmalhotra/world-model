@@ -25,6 +25,8 @@ TABLE_METRICS = [
     "target_reappearance_surprise",
     "target_hidden_nll",
     "jepa_latent_mse",
+    "jepa_mixture_nll",
+    "jepa_mixture_entropy",
     "jepa_pred_target_cosine",
     "jepa_target_latent_std",
     "jepa_pred_latent_std",
@@ -34,6 +36,7 @@ LOWER_IS_BETTER = [
     "target_reappearance_surprise",
     "target_hidden_nll",
     "jepa_latent_mse",
+    "jepa_mixture_nll",
 ]
 
 
@@ -114,6 +117,8 @@ def checkpoint_metadata(name: str, path: Path, device: torch.device) -> Dict[str
         "sigreg_sketches": numeric(sigreg_sketches),
         "sigreg_scale": numeric(sigreg_scale),
         "target_encoder": ckpt.get("target_encoder", "legacy_per_state"),
+        "belief_head": ckpt.get("belief_head", "single_gaussian"),
+        "mixture_components": numeric(ckpt.get("mixture_components")),
         "epoch": ckpt.get("epoch"),
         "best_metric": numeric(ckpt.get("best_metric")),
     }
@@ -212,8 +217,8 @@ def markdown_report(rows: List[Dict[str, object]], claims: Dict[str, object]) ->
         "",
         "## Variants",
         "",
-        "| variant | EMA | SIGReg | target encoder | RGB-D | checkpoint |",
-        "| --- | ---: | ---: | --- | ---: | --- |",
+        "| variant | EMA | SIGReg | target encoder | belief head | RGB-D | checkpoint |",
+        "| --- | ---: | ---: | --- | --- | ---: | --- |",
     ]
     seen = set()
     for row in rows:
@@ -229,6 +234,7 @@ def markdown_report(rows: List[Dict[str, object]], claims: Dict[str, object]) ->
                     str(bool(row.get("ema_enabled"))),
                     format_float(row.get("sigreg_weight")),
                     str(row.get("target_encoder", "")),
+                    str(row.get("belief_head", "")),
                     str(bool(row.get("rgbd"))),
                     f"`{row.get('checkpoint')}`",
                 ]
@@ -241,8 +247,8 @@ def markdown_report(rows: List[Dict[str, object]], claims: Dict[str, object]) ->
             "",
             "## Targeted Split Metrics",
             "",
-            "| split | variant | target dist | reappear surprise | target NLL | latent MSE | cosine | target std | pred std |",
-            "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+            "| split | variant | target dist | reappear surprise | target NLL | latent MSE | mix NLL | mix entropy | cosine | target std | pred std |",
+            "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
         ]
     )
     for row in sorted(rows, key=lambda item: (str(item.get("split")), str(item.get("variant")))):
@@ -256,6 +262,8 @@ def markdown_report(rows: List[Dict[str, object]], claims: Dict[str, object]) ->
                     format_float(row.get("target_reappearance_surprise")),
                     format_float(row.get("target_hidden_nll")),
                     format_float(row.get("jepa_latent_mse")),
+                    format_float(row.get("jepa_mixture_nll")),
+                    format_float(row.get("jepa_mixture_entropy")),
                     format_float(row.get("jepa_pred_target_cosine")),
                     format_float(row.get("jepa_target_latent_std")),
                     format_float(row.get("jepa_pred_latent_std")),

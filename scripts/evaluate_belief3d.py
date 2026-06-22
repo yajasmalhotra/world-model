@@ -21,6 +21,7 @@ from src.models.belief_jepa3d import BeliefJEPA3D, belief_jepa_diagnostics
 from src.models.belief_state import (
     ParticleBeliefConfig,
     particles_from_gaussian_sequence,
+    particles_from_gaussian_mixture_sequence,
     rollout_geometry_aware_particle_belief,
     rollout_particle_belief,
     rollout_particle_belief_from_gaussian,
@@ -106,6 +107,7 @@ def load_belief_jepa(config: Dict, device: torch.device, ckpt_path: str) -> tupl
         cnn_dim=int(model_cfg["encoder_cnn_dim"]),
         rnn_dim=int(model_cfg["encoder_rnn_dim"]),
         latent_dim=int(model_cfg.get("jepa_latent_dim", 64)),
+        mixture_components=int(ckpt.get("mixture_components", model_cfg.get("jepa_mixture_components", 3))),
         world_min=float(data_cfg["world_min"]),
         world_max=float(data_cfg["world_max"]),
         velocity_limit=float(model_cfg["velocity_limit"]),
@@ -116,7 +118,16 @@ def load_belief_jepa(config: Dict, device: torch.device, ckpt_path: str) -> tupl
     ema_prefixes = ("ema_target_encoder.", "ema_target_temporal.", "ema_target_temporal_proj.")
     if any(key.startswith(ema_prefixes) for key in incompatible.missing_keys):
         model.sync_ema_target_encoder()
+    missing_mixture = any(key.startswith("mixture_head.") for key in incompatible.missing_keys)
+    model.mixture_enabled = bool(int(ckpt.get("mixture_components", 0)) > 1 and not missing_mixture)
+    model.belief_head = str(ckpt.get("belief_head", "single_gaussian"))
     return model, rgbd, ema_enabled
+
+
+def jepa_diagnostic_outputs(outputs: Dict[str, torch.Tensor], mixture_enabled: bool) -> Dict[str, torch.Tensor]:
+    if mixture_enabled:
+        return outputs
+    return {key: value for key, value in outputs.items() if not key.startswith("mixture_")}
 
 
 def context_frames(batch: Dict, device: torch.device, rgbd: bool) -> torch.Tensor:
@@ -214,15 +225,28 @@ def evaluate_split(
                 include_target_reconstruction=False,
             )
             steps = min(outputs["mean"].shape[1], horizon)
-            particles, weights = particles_from_gaussian_sequence(
-                outputs["mean"][:, :steps],
-                outputs["log_std"][:, :steps],
-                object_mask,
-                cfg=particle_cfg,
-            )
+            if bool(getattr(jepa, "mixture_enabled", False)):
+                particles, weights = particles_from_gaussian_mixture_sequence(
+                    outputs["mixture_logits"][:, :steps],
+                    outputs["mixture_mean"][:, :steps],
+                    outputs["mixture_log_std"][:, :steps],
+                    object_mask,
+                    cfg=particle_cfg,
+                )
+            else:
+                particles, weights = particles_from_gaussian_sequence(
+                    outputs["mean"][:, :steps],
+                    outputs["log_std"][:, :steps],
+                    object_mask,
+                    cfg=particle_cfg,
+                )
             future_state = future_state[:, :steps]
             future_mask = future_mask[:, :steps]
-            diagnostics = belief_jepa_diagnostics(outputs, future_state, future_mask)
+            diagnostics = belief_jepa_diagnostics(
+                jepa_diagnostic_outputs(outputs, bool(getattr(jepa, "mixture_enabled", False))),
+                future_state,
+                future_mask,
+            )
         elif mode == "geometry":
             rollout_seed = int(config["project"].get("seed", 0)) + 10_007 * int(batch_idx + 1)
             obstacles = batch["obstacles"].to(device)
@@ -412,6 +436,7 @@ def main() -> None:
                     jepa_ema_enabled=jepa_ema_enabled,
                 )
                 metrics["jepa_ema_enabled"] = float(jepa_ema_enabled)
+                metrics["jepa_mixture_enabled"] = float(bool(getattr(belief_jepa, "mixture_enabled", False)))
                 row = {"split": split, "mode": "belief_jepa_latent_predictor", **metrics}
                 append_metrics(run_dir, row)
                 summary["splits"][f"jepa::{split}"] = metrics

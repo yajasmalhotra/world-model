@@ -27,6 +27,7 @@ from src.models.belief_state import (
     ParticleBeliefConfig,
     initialize_particles,
     particles_from_gaussian_sequence,
+    particles_from_gaussian_mixture_sequence,
     rollout_geometry_aware_particle_belief,
     rollout_particle_belief,
     rollout_particle_belief_from_gaussian,
@@ -143,6 +144,7 @@ def load_belief_jepa(config: Dict, device: torch.device, ckpt_path: str) -> tupl
         cnn_dim=int(model_cfg["encoder_cnn_dim"]),
         rnn_dim=int(model_cfg["encoder_rnn_dim"]),
         latent_dim=int(model_cfg.get("jepa_latent_dim", 64)),
+        mixture_components=int(ckpt.get("mixture_components", model_cfg.get("jepa_mixture_components", 3))),
         world_min=float(data_cfg["world_min"]),
         world_max=float(data_cfg["world_max"]),
         velocity_limit=float(model_cfg["velocity_limit"]),
@@ -153,6 +155,9 @@ def load_belief_jepa(config: Dict, device: torch.device, ckpt_path: str) -> tupl
     ema_prefixes = ("ema_target_encoder.", "ema_target_temporal.", "ema_target_temporal_proj.")
     if any(key.startswith(ema_prefixes) for key in incompatible.missing_keys):
         model.sync_ema_target_encoder()
+    missing_mixture = any(key.startswith("mixture_head.") for key in incompatible.missing_keys)
+    model.mixture_enabled = bool(int(ckpt.get("mixture_components", 0)) > 1 and not missing_mixture)
+    model.belief_head = str(ckpt.get("belief_head", "single_gaussian"))
     model.eval()
     return model, rgbd, ema_enabled
 
@@ -739,12 +744,21 @@ def build_demo_for_seed(
             )
             steps = min(horizon, jepa_outputs["mean"].shape[1])
             if steps == horizon:
-                jepa_particles, jepa_weights = particles_from_gaussian_sequence(
-                    jepa_outputs["mean"][:, :horizon],
-                    jepa_outputs["log_std"][:, :horizon],
-                    object_mask,
-                    cfg=particle_cfg,
-                )
+                if bool(getattr(belief_jepa, "mixture_enabled", False)):
+                    jepa_particles, jepa_weights = particles_from_gaussian_mixture_sequence(
+                        jepa_outputs["mixture_logits"][:, :horizon],
+                        jepa_outputs["mixture_mean"][:, :horizon],
+                        jepa_outputs["mixture_log_std"][:, :horizon],
+                        object_mask,
+                        cfg=particle_cfg,
+                    )
+                else:
+                    jepa_particles, jepa_weights = particles_from_gaussian_sequence(
+                        jepa_outputs["mean"][:, :horizon],
+                        jepa_outputs["log_std"][:, :horizon],
+                        object_mask,
+                        cfg=particle_cfg,
+                    )
                 add_trace(
                     "jepa",
                     jepa_particles.squeeze(0).detach().cpu().numpy(),
@@ -842,6 +856,16 @@ def build_demo_for_seed(
             return bool(jepa_rgbd)
         return None
 
+    def method_belief_head(method: str) -> Optional[str]:
+        if method == "jepa" and belief_jepa is not None:
+            return str(getattr(belief_jepa, "belief_head", "single_gaussian"))
+        return None
+
+    def method_mixture_enabled(method: str) -> Optional[bool]:
+        if method == "jepa" and belief_jepa is not None:
+            return bool(getattr(belief_jepa, "mixture_enabled", False))
+        return None
+
     for method in requested_methods:
         trace = traces.get(method)
         if trace is None:
@@ -851,6 +875,8 @@ def build_demo_for_seed(
                 "available": False,
                 "checkpoint": checkpoint,
                 "rgbd": method_rgbd_flag(method),
+                "belief_head": method_belief_head(method),
+                "mixture_enabled": method_mixture_enabled(method),
                 "mean_expected_distance": None,
                 "mean_surprise": None,
                 "mean_entropy": None,
@@ -865,6 +891,8 @@ def build_demo_for_seed(
             "available": True,
             "checkpoint": trace["checkpoint"],
             "rgbd": method_rgbd_flag(method),
+            "belief_head": method_belief_head(method),
+            "mixture_enabled": method_mixture_enabled(method),
             "mean_expected_distance": finite_mean(trace_metrics["expected_distance"]),
             "mean_surprise": finite_mean(trace_metrics["surprise"]),
             "mean_entropy": finite_mean(trace_metrics["entropy"]),

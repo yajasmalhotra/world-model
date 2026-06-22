@@ -268,3 +268,45 @@ def particles_from_gaussian_sequence(
     weights = torch.ones((bsz, horizon, n_obj, cfg.num_particles), device=device, dtype=dtype) / float(cfg.num_particles)
     weights = weights * object_mask[:, None, :, None]
     return particles, weights
+
+
+def particles_from_gaussian_mixture_sequence(
+    component_logits: torch.Tensor,
+    component_mean: torch.Tensor,
+    component_log_std: torch.Tensor,
+    object_mask: torch.Tensor,
+    cfg: ParticleBeliefConfig,
+    generator: torch.Generator | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Convert a per-timestep Gaussian mixture trajectory belief into particles.
+
+    Args:
+        component_logits: [B, H, O, K]
+        component_mean: [B, H, O, K, 6]
+        component_log_std: [B, H, O, K, 6]
+        object_mask: [B, O]
+    Returns:
+        particles: [B, H, O, P, 6]
+        weights: [B, H, O, P]
+    """
+    bsz, horizon, n_obj, n_components = component_logits.shape
+    device = component_logits.device
+    dtype = component_mean.dtype
+    flat_probs = torch.softmax(component_logits.reshape(-1, n_components), dim=-1)
+    component_idx = torch.multinomial(
+        flat_probs,
+        num_samples=cfg.num_particles,
+        replacement=True,
+        generator=generator,
+    ).reshape(bsz, horizon, n_obj, cfg.num_particles)
+    gather_idx = component_idx.unsqueeze(-1).expand(-1, -1, -1, -1, component_mean.shape[-1])
+    selected_mean = component_mean.gather(dim=3, index=gather_idx)
+    selected_log_std = component_log_std.gather(dim=3, index=gather_idx)
+    eps = torch.randn(selected_mean.shape, device=device, dtype=dtype, generator=generator)
+    particles = selected_mean + eps * torch.exp(selected_log_std).clamp_min(1e-4)
+    pos = particles[..., 0:3].clamp(cfg.world_min, cfg.world_max)
+    particles = torch.cat([pos, particles[..., 3:6]], dim=-1)
+    weights = torch.ones((bsz, horizon, n_obj, cfg.num_particles), device=device, dtype=dtype) / float(cfg.num_particles)
+    weights = weights * object_mask[:, None, :, None]
+    return particles, weights

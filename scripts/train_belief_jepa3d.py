@@ -58,6 +58,7 @@ def build_model(config: Dict, device: torch.device, rgbd: bool) -> BeliefJEPA3D:
         cnn_dim=int(model_cfg["encoder_cnn_dim"]),
         rnn_dim=int(model_cfg["encoder_rnn_dim"]),
         latent_dim=int(model_cfg.get("jepa_latent_dim", 64)),
+        mixture_components=int(model_cfg.get("jepa_mixture_components", 3)),
         world_min=float(data_cfg["world_min"]),
         world_max=float(data_cfg["world_max"]),
         velocity_limit=float(model_cfg["velocity_limit"]),
@@ -70,6 +71,7 @@ def loss_weights(train_cfg: Dict) -> Dict[str, float | int]:
     return {
         "latent_weight": float(train_cfg.get("latent_weight", 1.0)),
         "belief_weight": float(train_cfg.get("belief_weight", 0.5)),
+        "mixture_belief_weight": float(train_cfg.get("mixture_belief_weight", 0.25)),
         "target_recon_weight": float(train_cfg.get("target_recon_weight", 0.1)),
         "sigreg_weight": float(train_cfg.get("sigreg_weight", 0.0)),
         "sigreg_sketches": int(train_cfg.get("sigreg_sketches", 16)),
@@ -191,6 +193,8 @@ def main() -> None:
             "sigreg_weight": float(loss_cfg["sigreg_weight"]),
             "sigreg_sketches": float(loss_cfg["sigreg_sketches"]),
             "sigreg_scale": float(loss_cfg["sigreg_scale"]),
+            "mixture_belief_weight": float(loss_cfg["mixture_belief_weight"]),
+            "mixture_components": float(model.mixture_components),
             "global_step": float(global_step),
             "train_loss": train_metrics.get("total", math.nan),
             **train_metrics,
@@ -214,7 +218,10 @@ def main() -> None:
                     "sigreg_weight": float(loss_cfg["sigreg_weight"]),
                     "sigreg_sketches": int(loss_cfg["sigreg_sketches"]),
                     "sigreg_scale": float(loss_cfg["sigreg_scale"]),
+                    "mixture_belief_weight": float(loss_cfg["mixture_belief_weight"]),
                     "target_encoder": TARGET_ENCODER_KIND,
+                    "mixture_components": int(model.mixture_components),
+                    "belief_head": f"gaussian_mixture_{int(model.mixture_components)}",
                 },
             )
 
@@ -232,7 +239,10 @@ def main() -> None:
             "sigreg_weight": float(loss_cfg["sigreg_weight"]),
             "sigreg_sketches": int(loss_cfg["sigreg_sketches"]),
             "sigreg_scale": float(loss_cfg["sigreg_scale"]),
+            "mixture_belief_weight": float(loss_cfg["mixture_belief_weight"]),
             "target_encoder": TARGET_ENCODER_KIND,
+            "mixture_components": int(model.mixture_components),
+            "belief_head": f"gaussian_mixture_{int(model.mixture_components)}",
         },
     )
     print(f"Done. Best checkpoint: {best_ckpt}")

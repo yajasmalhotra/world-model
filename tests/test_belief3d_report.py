@@ -26,7 +26,10 @@ class Belief3DReportTest(unittest.TestCase):
                 "jepa::test_structured_occlusion": {
                     "target_reappearance_surprise": 8.0,
                     "jepa_latent_mse": 1.5,
+                    "jepa_mixture_nll": 2.5,
+                    "jepa_mixture_entropy": 0.9,
                     "jepa_ema_enabled": 1.0,
+                    "jepa_mixture_enabled": 1.0,
                 },
             },
         }
@@ -39,11 +42,14 @@ class Belief3DReportTest(unittest.TestCase):
         self.assertEqual(claims["structured_geometry_gain"]["surprise_reduction"], 8.0)
         self.assertEqual(claims["structured_counterfactual"]["selectivity"], 0.2)
         self.assertTrue(claims["jepa"]["ema_enabled"])
+        self.assertTrue(claims["jepa"]["mixture_enabled"])
+        self.assertEqual(claims["jepa"]["mean_mixture_nll"], 2.5)
 
         report = markdown_report(run_dir, rows, claims)
         self.assertIn("Geometry-aware belief reduces", report)
         self.assertIn("Counterfactual selectivity", report)
         self.assertIn("Belief-JEPA evaluation includes latent diagnostics", report)
+        self.assertIn("mean mixture NLL", report)
 
     def test_report_csv_uses_union_schema(self) -> None:
         rows = flatten_summary(Path("runs/example"), self._summary())
@@ -53,6 +59,8 @@ class Belief3DReportTest(unittest.TestCase):
             text = out.read_text(encoding="utf-8")
         self.assertIn("target_counterfactual_selectivity", text.splitlines()[0])
         self.assertIn("jepa_latent_mse", text.splitlines()[0])
+        self.assertIn("jepa_mixture_nll", text.splitlines()[0])
+        self.assertIn("jepa_mixture_enabled", text.splitlines()[0])
 
 
 if __name__ == "__main__":

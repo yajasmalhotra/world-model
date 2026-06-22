@@ -337,8 +337,20 @@ def audit_report(report_json_path: Path) -> List[Check]:
         checks.append(fail_check("report.counterfactual_selectivity", f"Invalid counterfactual claim: {cf}"))
 
     jepa = claims.get("jepa", {})
-    if bool(jepa.get("ema_enabled")) and is_finite_number(jepa.get("mean_latent_mse")):
-        checks.append(pass_check("report.jepa_diagnostics", f"EMA JEPA latent MSE={float(jepa['mean_latent_mse']):.4f}."))
+    if (
+        bool(jepa.get("ema_enabled"))
+        and bool(jepa.get("mixture_enabled"))
+        and is_finite_number(jepa.get("mean_latent_mse"))
+        and is_finite_number(jepa.get("mean_mixture_nll"))
+        and is_finite_number(jepa.get("mean_mixture_entropy"))
+    ):
+        checks.append(
+            pass_check(
+                "report.jepa_diagnostics",
+                f"EMA JEPA latent MSE={float(jepa['mean_latent_mse']):.4f}, "
+                f"mixture NLL={float(jepa['mean_mixture_nll']):.4f}.",
+            )
+        )
     else:
         checks.append(fail_check("report.jepa_diagnostics", f"Invalid JEPA diagnostics: {jepa}"))
 
@@ -390,10 +402,17 @@ def audit_jepa_ablation(ablation_json_path: Path) -> List[Check]:
     else:
         checks.append(fail_check("jepa_ablation.target_encoder", f"Mixed target encoders in ablation: {sorted(target_encoders)}."))
 
+    belief_heads = {str(row.get("belief_head", "single_gaussian")) for row in rows}
+    if len(belief_heads) == 1 and any(head.startswith("gaussian_mixture") for head in belief_heads):
+        checks.append(pass_check("jepa_ablation.belief_head", f"All variants use {next(iter(belief_heads))}."))
+    else:
+        checks.append(fail_check("jepa_ablation.belief_head", f"Invalid or mixed belief heads in ablation: {sorted(belief_heads)}."))
+
     required_metrics = {
         "target_hidden_expected_distance",
         "target_reappearance_surprise",
         "jepa_latent_mse",
+        "jepa_mixture_nll",
         "jepa_pred_target_cosine",
     }
     if rows and all(any(metric in row and is_finite_number(row.get(metric)) for row in rows) for metric in required_metrics):

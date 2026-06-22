@@ -58,6 +58,7 @@ model3d:
   velocity_limit: 0.16
   min_log_std: -5.0
   max_log_std: -1.0
+  jepa_mixture_components: 3
 
 train_belief3d:
   lr: 0.001
@@ -69,6 +70,7 @@ train_belief3d:
   ema_update_after_step: 0
   latent_weight: 1.0
   belief_weight: 0.5
+  mixture_belief_weight: 0.25
   target_recon_weight: 0.1
   sigreg_weight: 0.05
   sigreg_sketches: 16

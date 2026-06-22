@@ -25,6 +25,7 @@ class BeliefJEPA3D(nn.Module):
         cnn_dim: int = 96,
         rnn_dim: int = 128,
         latent_dim: int = 64,
+        mixture_components: int = 3,
         world_min: float = -1.0,
         world_max: float = 1.0,
         velocity_limit: float = 0.16,
@@ -35,6 +36,7 @@ class BeliefJEPA3D(nn.Module):
         self.max_objects = int(max_objects)
         self.horizon = int(horizon)
         self.latent_dim = int(latent_dim)
+        self.mixture_components = max(1, int(mixture_components))
         self.world_min = float(world_min)
         self.world_max = float(world_max)
         self.velocity_limit = float(velocity_limit)
@@ -56,6 +58,11 @@ class BeliefJEPA3D(nn.Module):
             nn.Linear(rnn_dim, rnn_dim),
             nn.ReLU(),
             nn.Linear(rnn_dim, self.horizon * self.max_objects * (latent_dim + 12)),
+        )
+        self.mixture_head = nn.Sequential(
+            nn.Linear(latent_dim, latent_dim),
+            nn.ReLU(),
+            nn.Linear(latent_dim, self.mixture_components * 13),
         )
         self.target_encoder = nn.Sequential(
             nn.Linear(7, latent_dim),
@@ -127,6 +134,13 @@ class BeliefJEPA3D(nn.Module):
         target_occ = future_state[:, :steps, :, 7:8]
         return torch.cat([target_dyn, target_occ], dim=-1)
 
+    def _bound_state6(self, raw_mean: torch.Tensor) -> torch.Tensor:
+        center = 0.5 * (self.world_min + self.world_max)
+        half_span = 0.5 * (self.world_max - self.world_min)
+        pos = center + half_span * torch.tanh(raw_mean[..., 0:3])
+        vel = self.velocity_limit * torch.tanh(raw_mean[..., 3:6])
+        return torch.cat([pos, vel], dim=-1)
+
     def _encode_target(self, target_input: torch.Tensor, use_ema_target: bool) -> torch.Tensor:
         encoder, temporal, temporal_proj = self._ema_target_modules() if use_ema_target else self._online_target_modules()
         bsz, steps, objects, _features = target_input.shape
@@ -160,14 +174,28 @@ class BeliefJEPA3D(nn.Module):
         raw_mean = raw[..., self.latent_dim : self.latent_dim + 6]
         raw_log_std = raw[..., self.latent_dim + 6 :]
 
-        center = 0.5 * (self.world_min + self.world_max)
-        half_span = 0.5 * (self.world_max - self.world_min)
-        pos = center + half_span * torch.tanh(raw_mean[..., 0:3])
-        vel = self.velocity_limit * torch.tanh(raw_mean[..., 3:6])
-        mean = torch.cat([pos, vel], dim=-1)
+        mean = self._bound_state6(raw_mean)
         log_std = raw_log_std.clamp(self.min_log_std, self.max_log_std)
 
-        out = {"mean": mean, "log_std": log_std, "pred_latent": pred_latent}
+        mixture_raw = self.mixture_head(pred_latent).reshape(
+            bsz,
+            self.horizon,
+            self.max_objects,
+            self.mixture_components,
+            13,
+        )
+        mixture_logits = mixture_raw[..., 0]
+        mixture_mean = self._bound_state6(mixture_raw[..., 1:7])
+        mixture_log_std = mixture_raw[..., 7:13].clamp(self.min_log_std, self.max_log_std)
+
+        out = {
+            "mean": mean,
+            "log_std": log_std,
+            "pred_latent": pred_latent,
+            "mixture_logits": mixture_logits,
+            "mixture_mean": mixture_mean,
+            "mixture_log_std": mixture_log_std,
+        }
         if future_state is not None:
             steps = min(self.horizon, future_state.shape[1])
             target_input = self._target_input(future_state, steps)
@@ -231,12 +259,35 @@ def _masked_std(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     return selected.std(unbiased=False)
 
 
+def gaussian_mixture_nll(
+    component_logits: torch.Tensor,
+    component_mean: torch.Tensor,
+    component_log_std: torch.Tensor,
+    target: torch.Tensor,
+    mask: torch.Tensor,
+) -> torch.Tensor:
+    target = target.unsqueeze(-2)
+    inv_var = torch.exp(-2.0 * component_log_std)
+    component_nll = 0.5 * ((target - component_mean) ** 2 * inv_var + 2.0 * component_log_std).sum(dim=-1)
+    log_prob = torch.log_softmax(component_logits, dim=-1) - component_nll
+    nll = -torch.logsumexp(log_prob, dim=-1)
+    return (nll * mask).sum() / mask.sum().clamp_min(1.0)
+
+
+def gaussian_mixture_entropy(component_logits: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    log_probs = torch.log_softmax(component_logits, dim=-1)
+    probs = torch.softmax(component_logits, dim=-1)
+    entropy = -(probs * log_probs).sum(dim=-1)
+    return (entropy * mask).sum() / mask.sum().clamp_min(1.0)
+
+
 def belief_jepa_loss(
     outputs: dict[str, torch.Tensor],
     future_state: torch.Tensor,
     future_mask: torch.Tensor,
     latent_weight: float = 1.0,
     belief_weight: float = 0.5,
+    mixture_belief_weight: float = 0.25,
     target_recon_weight: float = 0.1,
     sigreg_weight: float = 0.0,
     sigreg_sketches: int = 16,
@@ -250,6 +301,14 @@ def belief_jepa_loss(
     inv_var = torch.exp(-2.0 * log_std)
     nll = 0.5 * ((target - mean) ** 2 * inv_var + 2.0 * log_std)
     belief_nll = (nll * mask).sum() / mask.sum().clamp_min(1.0)
+    mixture_nll = gaussian_mixture_nll(
+        outputs["mixture_logits"][:, :steps],
+        outputs["mixture_mean"][:, :steps],
+        outputs["mixture_log_std"][:, :steps],
+        target,
+        future_mask[:, :steps],
+    )
+    mixture_entropy = gaussian_mixture_entropy(outputs["mixture_logits"][:, :steps], future_mask[:, :steps])
 
     target_latent = outputs["target_latent"][:, :steps]
     pred_latent = outputs["pred_latent"][:, :steps]
@@ -281,6 +340,7 @@ def belief_jepa_loss(
     total = (
         latent_weight * latent_mse
         + belief_weight * belief_nll
+        + mixture_belief_weight * mixture_nll
         + target_recon_weight * target_recon_mse
         + float(sigreg_weight) * sigreg
     )
@@ -288,6 +348,8 @@ def belief_jepa_loss(
         "total": total,
         "latent_mse": latent_mse,
         "belief_nll": belief_nll,
+        "mixture_nll": mixture_nll,
+        "mixture_entropy": mixture_entropy,
         "target_recon_mse": target_recon_mse,
         "sigreg": sigreg,
         "pred_sigreg": pred_sigreg,
@@ -312,9 +374,19 @@ def belief_jepa_diagnostics(
     latent_mse = (((pred_latent - target_latent) ** 2) * mask).sum() / mask.sum().clamp_min(1.0)
     cosine = F.cosine_similarity(pred_latent, target_latent, dim=-1)
     pred_target_cosine = (cosine * future_mask[:, :steps]).sum() / future_mask[:, :steps].sum().clamp_min(1.0)
-    return {
+    diagnostics = {
         "latent_mse": latent_mse,
         "pred_target_cosine": pred_target_cosine,
         "target_latent_std": _masked_std(target_latent, mask.expand_as(target_latent)),
         "pred_latent_std": _masked_std(pred_latent, mask.expand_as(pred_latent)),
     }
+    if "mixture_logits" in outputs:
+        diagnostics["mixture_nll"] = gaussian_mixture_nll(
+            outputs["mixture_logits"][:, :steps],
+            outputs["mixture_mean"][:, :steps],
+            outputs["mixture_log_std"][:, :steps],
+            future_state[:, :steps, :, 0:6],
+            future_mask[:, :steps],
+        )
+        diagnostics["mixture_entropy"] = gaussian_mixture_entropy(outputs["mixture_logits"][:, :steps], future_mask[:, :steps])
+    return diagnostics

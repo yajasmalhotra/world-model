@@ -19,10 +19,14 @@ class BeliefJEPA3DAblationReportTest(unittest.TestCase):
                 "ema_enabled": True,
                 "rgbd": False,
                 "sigreg_weight": 0.05,
+                "target_encoder": "bidirectional_temporal_state6_occ",
+                "belief_head": "gaussian_mixture_3",
                 "target_hidden_expected_distance": 0.5,
                 "target_reappearance_surprise": 7.0,
                 "target_hidden_nll": 1.1,
                 "jepa_latent_mse": 1.2,
+                "jepa_mixture_nll": 1.0,
+                "jepa_mixture_entropy": 0.9,
                 "jepa_pred_target_cosine": 0.3,
                 "jepa_target_latent_std": 0.14,
                 "jepa_pred_latent_std": 0.06,
@@ -34,10 +38,14 @@ class BeliefJEPA3DAblationReportTest(unittest.TestCase):
                 "ema_enabled": False,
                 "rgbd": False,
                 "sigreg_weight": 0.05,
+                "target_encoder": "bidirectional_temporal_state6_occ",
+                "belief_head": "gaussian_mixture_3",
                 "target_hidden_expected_distance": 0.7,
                 "target_reappearance_surprise": 9.0,
                 "target_hidden_nll": 1.5,
                 "jepa_latent_mse": 1.4,
+                "jepa_mixture_nll": 1.2,
+                "jepa_mixture_entropy": 0.8,
                 "jepa_pred_target_cosine": 0.2,
                 "jepa_target_latent_std": 0.15,
                 "jepa_pred_latent_std": 0.05,
@@ -49,10 +57,14 @@ class BeliefJEPA3DAblationReportTest(unittest.TestCase):
                 "ema_enabled": True,
                 "rgbd": False,
                 "sigreg_weight": 0.0,
+                "target_encoder": "bidirectional_temporal_state6_occ",
+                "belief_head": "gaussian_mixture_3",
                 "target_hidden_expected_distance": 0.6,
                 "target_reappearance_surprise": 8.0,
                 "target_hidden_nll": 1.3,
                 "jepa_latent_mse": 1.3,
+                "jepa_mixture_nll": 1.1,
+                "jepa_mixture_entropy": 0.7,
                 "jepa_pred_target_cosine": 0.25,
                 "jepa_target_latent_std": 0.1,
                 "jepa_pred_latent_std": 0.04,
@@ -83,6 +95,7 @@ class BeliefJEPA3DAblationReportTest(unittest.TestCase):
             header = path.read_text(encoding="utf-8").splitlines()[0]
         self.assertIn("sigreg_weight", header)
         self.assertIn("jepa_pred_target_cosine", header)
+        self.assertIn("jepa_mixture_nll", header)
 
     def test_evidence_audit_accepts_ablation_report(self) -> None:
         rows = self._rows()

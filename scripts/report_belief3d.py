@@ -23,8 +23,11 @@ IMPORTANT_METRICS = [
     "target_counterfactual_visual_belief_delta",
     "target_counterfactual_selectivity",
     "jepa_latent_mse",
+    "jepa_mixture_nll",
+    "jepa_mixture_entropy",
     "jepa_pred_target_cosine",
     "jepa_ema_enabled",
+    "jepa_mixture_enabled",
 ]
 
 
@@ -84,6 +87,13 @@ def row_for(rows: Iterable[Dict[str, object]], split: str, mode: str) -> Optiona
     return None
 
 
+def mean_metric(rows: Iterable[Dict[str, object]], metric: str) -> Optional[float]:
+    values = [value for row in rows if (value := numeric(row, metric)) is not None]
+    if not values:
+        return None
+    return sum(values) / len(values)
+
+
 def best_by_metric(rows: Iterable[Dict[str, object]], split: str, metric: str, higher_is_better: bool = False) -> Optional[Dict[str, object]]:
     scored = []
     for row in rows:
@@ -136,7 +146,10 @@ def summarize_claims(rows: List[Dict[str, object]]) -> Dict[str, object]:
     if jepa_rows:
         claims["jepa"] = {
             "ema_enabled": any(numeric(row, "jepa_ema_enabled") == 1.0 for row in jepa_rows),
-            "mean_latent_mse": sum(numeric(row, "jepa_latent_mse") or 0.0 for row in jepa_rows) / len(jepa_rows),
+            "mixture_enabled": any(numeric(row, "jepa_mixture_enabled") == 1.0 for row in jepa_rows),
+            "mean_latent_mse": mean_metric(jepa_rows, "jepa_latent_mse"),
+            "mean_mixture_nll": mean_metric(jepa_rows, "jepa_mixture_nll"),
+            "mean_mixture_entropy": mean_metric(jepa_rows, "jepa_mixture_entropy"),
         }
     return claims
 
@@ -193,7 +206,8 @@ def markdown_report(run_dir: Path, rows: List[Dict[str, object]], claims: Dict[s
     if isinstance(jepa, dict):
         lines.append(
             "- Belief-JEPA evaluation includes latent diagnostics "
-            f"(EMA enabled: `{bool(jepa.get('ema_enabled'))}`, mean latent MSE: {format_float(jepa.get('mean_latent_mse'))})."
+            f"(EMA enabled: `{bool(jepa.get('ema_enabled'))}`, mean latent MSE: {format_float(jepa.get('mean_latent_mse'))}, "
+            f"mixture enabled: `{bool(jepa.get('mixture_enabled'))}`, mean mixture NLL: {format_float(jepa.get('mean_mixture_nll'))})."
         )
     if len(lines) == 5:
         lines.append("- No structured claims were available in this run.")

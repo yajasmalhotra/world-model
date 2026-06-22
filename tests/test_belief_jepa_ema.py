@@ -10,6 +10,8 @@ from src.models.belief_jepa3d import (
     belief_jepa_loss,
     sketched_isotropic_gaussian_regularizer,
 )
+from src.models.belief_state import ParticleBeliefConfig, particles_from_gaussian_mixture_sequence
+from scripts.evaluate_belief3d import jepa_diagnostic_outputs
 
 
 class BeliefJEPAEMATest(unittest.TestCase):
@@ -91,6 +93,49 @@ class BeliefJEPAEMATest(unittest.TestCase):
 
         self.assertTrue(torch.allclose(future_state[:, 0], alternate_future[:, 0]))
         self.assertFalse(torch.allclose(base["target_latent"][:, 0], changed["target_latent"][:, 0]))
+
+    def test_mixture_belief_outputs_loss_and_particles(self) -> None:
+        model = self._make_model()
+        model.sync_ema_target_encoder()
+        frames, future_state, future_mask = self._make_batch()
+        outputs = model(frames, future_state=future_state, use_ema_target=True)
+
+        self.assertEqual(outputs["mixture_logits"].shape, (2, 4, 2, 3))
+        self.assertEqual(outputs["mixture_mean"].shape, (2, 4, 2, 3, 6))
+        self.assertEqual(outputs["mixture_log_std"].shape, (2, 4, 2, 3, 6))
+
+        losses = belief_jepa_loss(outputs, future_state, future_mask, mixture_belief_weight=0.25)
+        self.assertIn("mixture_nll", losses)
+        self.assertIn("mixture_entropy", losses)
+        self.assertTrue(torch.isfinite(losses["mixture_nll"]))
+        self.assertTrue(torch.isfinite(losses["mixture_entropy"]))
+
+        particles, weights = particles_from_gaussian_mixture_sequence(
+            outputs["mixture_logits"],
+            outputs["mixture_mean"],
+            outputs["mixture_log_std"],
+            torch.ones(2, 2),
+            ParticleBeliefConfig(num_particles=9),
+        )
+        self.assertEqual(particles.shape, (2, 4, 2, 9, 6))
+        self.assertEqual(weights.shape, (2, 4, 2, 9))
+
+    def test_legacy_diagnostics_strip_untrained_mixture_outputs(self) -> None:
+        outputs = {
+            "mean": torch.zeros(1),
+            "pred_latent": torch.zeros(1),
+            "target_latent": torch.zeros(1),
+            "mixture_logits": torch.zeros(1),
+            "mixture_mean": torch.zeros(1),
+            "mixture_log_std": torch.zeros(1),
+        }
+        legacy = jepa_diagnostic_outputs(outputs, mixture_enabled=False)
+        current = jepa_diagnostic_outputs(outputs, mixture_enabled=True)
+
+        self.assertNotIn("mixture_logits", legacy)
+        self.assertNotIn("mixture_mean", legacy)
+        self.assertNotIn("mixture_log_std", legacy)
+        self.assertIn("mixture_logits", current)
 
     def test_sigreg_is_finite_and_contributes_to_loss(self) -> None:
         model = self._make_model()
