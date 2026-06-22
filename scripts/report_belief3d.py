@@ -179,6 +179,20 @@ def format_float(value: object) -> str:
     return f"{value_float:.4f}"
 
 
+def path_mode_tokens(row: Dict[str, object]) -> List[str]:
+    prefix = "path_mode_"
+    suffix = "_target_hidden_expected_distance"
+    tokens = []
+    for key in row.keys():
+        if key.startswith(prefix) and key.endswith(suffix):
+            tokens.append(key[len(prefix) : -len(suffix)])
+    return sorted(tokens)
+
+
+def path_mode_label(token: str) -> str:
+    return token.replace("_", " ")
+
+
 def markdown_report(run_dir: Path, rows: List[Dict[str, object]], claims: Dict[str, object]) -> str:
     lines = [
         "# Belief-JEPA 3D Benchmark Report",
@@ -237,6 +251,40 @@ def markdown_report(run_dir: Path, rows: List[Dict[str, object]], claims: Dict[s
             )
             + " |"
         )
+    path_rows = []
+    for row in sorted(rows, key=lambda item: (str(item.get("split")), str(item.get("mode")))):
+        for token in path_mode_tokens(row):
+            base = f"path_mode_{token}_target_"
+            if numeric(row, f"{base}hidden_expected_distance") is None:
+                continue
+            path_rows.append((row, token, base))
+    if path_rows:
+        lines.extend(
+            [
+                "",
+                "## Target Metrics By Path Mode",
+                "",
+                "| split | mode | path mode | target dist | target NLL | target reappear surprise | hidden count | cf selectivity |",
+                "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: |",
+            ]
+        )
+        for row, token, base in path_rows:
+            lines.append(
+                "| "
+                + " | ".join(
+                    [
+                        str(row.get("split", "")),
+                        str(row.get("mode", "")),
+                        path_mode_label(token),
+                        format_float(row.get(f"{base}hidden_expected_distance")),
+                        format_float(row.get(f"{base}hidden_nll")),
+                        format_float(row.get(f"{base}reappearance_surprise")),
+                        format_float(row.get(f"{base}hidden_count")),
+                        format_float(row.get(f"path_mode_{token}_target_counterfactual_selectivity")),
+                    ]
+                )
+                + " |"
+            )
     lines.append("")
     return "\n".join(lines)
 

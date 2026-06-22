@@ -130,6 +130,13 @@ def jepa_diagnostic_outputs(outputs: Dict[str, torch.Tensor], mixture_enabled: b
     return {key: value for key, value in outputs.items() if not key.startswith("mixture_")}
 
 
+def metric_token(value: object) -> str:
+    text = str(value or "unknown").strip().lower()
+    chars = [char if char.isalnum() else "_" for char in text]
+    token = "_".join(part for part in "".join(chars).split("_") if part)
+    return token or "unknown"
+
+
 def context_frames(batch: Dict, device: torch.device, rgbd: bool) -> torch.Tensor:
     frames = batch["obs_frames"].to(device)
     if not rgbd:
@@ -152,6 +159,29 @@ def target_object_mask(batch: Dict, future_mask: torch.Tensor) -> Optional[torch
             target_mask[b_idx, :, obj_idx] = future_mask[b_idx, :, obj_idx]
             found = True
     return target_mask if found else None
+
+
+def target_path_mode_masks(batch: Dict, future_mask: torch.Tensor) -> Dict[str, torch.Tensor]:
+    metadata = batch.get("metadata")
+    if not metadata:
+        return {}
+    masks: Dict[str, torch.Tensor] = {}
+    for b_idx, item in enumerate(metadata):
+        target = item.get("target") if isinstance(item, dict) else None
+        if not target:
+            continue
+        obj_idx = int(target.get("object_index", target.get("target_object_index", -1)))
+        if not 0 <= obj_idx < future_mask.shape[-1]:
+            continue
+        path_mode = metric_token(target.get("path_mode", "unknown"))
+        if path_mode not in masks:
+            masks[path_mode] = torch.zeros_like(future_mask)
+        masks[path_mode][b_idx, :, obj_idx] = future_mask[b_idx, :, obj_idx]
+    return {
+        path_mode: mask
+        for path_mode, mask in masks.items()
+        if float(mask.sum().detach().cpu().item()) > 0.0
+    }
 
 
 def seeded_geometry_rollout(
@@ -291,6 +321,7 @@ def evaluate_split(
             credible_levels=belief_cfg.get("credible_levels", [0.5, 0.7, 0.9]),
         )
         target_mask = target_object_mask(batch, future_mask)
+        path_mode_masks = target_path_mode_masks(batch, future_mask)
         if target_mask is not None:
             target_metrics = particle_belief_metrics(
                 particles,
@@ -302,6 +333,17 @@ def evaluate_split(
                 credible_levels=belief_cfg.get("credible_levels", [0.5, 0.7, 0.9]),
             )
             metrics.update({f"target_{key}": value for key, value in target_metrics.items()})
+        for path_mode, path_mask in path_mode_masks.items():
+            path_metrics = particle_belief_metrics(
+                particles,
+                weights,
+                future_state,
+                path_mask,
+                density_sigma=float(belief_cfg["density_sigma"]),
+                mass_radius=float(belief_cfg["mass_radius"]),
+                credible_levels=belief_cfg.get("credible_levels", [0.5, 0.7, 0.9]),
+            )
+            metrics.update({f"path_mode_{path_mode}_target_{key}": value for key, value in path_metrics.items()})
         if mode == "geometry":
             metrics.update(
                 counterfactual_delta_metrics(
@@ -354,6 +396,34 @@ def evaluate_split(
                 metrics["target_counterfactual_selectivity"] = (
                     metrics["target_counterfactual_physical_belief_delta"]
                     - metrics["target_counterfactual_visual_belief_delta"]
+                )
+            for path_mode, path_mask in path_mode_masks.items():
+                physical_prefix = f"path_mode_{path_mode}_target_counterfactual_physical"
+                visual_prefix = f"path_mode_{path_mode}_target_counterfactual_visual"
+                metrics.update(
+                    counterfactual_delta_metrics(
+                        particles,
+                        weights,
+                        physical_cf_particles,
+                        physical_cf_weights,
+                        future_state,
+                        path_mask,
+                        prefix=physical_prefix,
+                    )
+                )
+                metrics.update(
+                    counterfactual_delta_metrics(
+                        particles,
+                        weights,
+                        visual_cf_particles,
+                        visual_cf_weights,
+                        future_state,
+                        path_mask,
+                        prefix=visual_prefix,
+                    )
+                )
+                metrics[f"path_mode_{path_mode}_target_counterfactual_selectivity"] = (
+                    metrics[f"{physical_prefix}_belief_delta"] - metrics[f"{visual_prefix}_belief_delta"]
                 )
         if mode == "jepa":
             metrics.update({f"jepa_{key}": float(value.detach().cpu().item()) for key, value in diagnostics.items()})

@@ -360,6 +360,20 @@ def audit_report(report_json_path: Path) -> List[Check]:
         checks.append(pass_check("report.target_metrics", "Target-only distance, entropy, and reappearance metrics are present."))
     else:
         checks.append(fail_check("report.target_metrics", f"Missing one of {sorted(required_row_metrics)}"))
+
+    path_modes = set()
+    prefix = "path_mode_"
+    suffix = "_target_hidden_expected_distance"
+    for row in rows:
+        for key in row.keys():
+            if key.startswith(prefix) and key.endswith(suffix) and is_finite_number(row.get(key)):
+                path_modes.add(key[len(prefix) : -len(suffix)])
+    required_path_modes = {"linear", "bounce", "curved", "impossible_jump"}
+    if required_path_modes.issubset(path_modes):
+        checks.append(pass_check("report.path_mode_metrics", f"Target metrics are sliced by path modes: {sorted(path_modes)}."))
+    else:
+        missing = sorted(required_path_modes - path_modes)
+        checks.append(fail_check("report.path_mode_metrics", f"Missing path-mode target metrics for {missing}."))
     return checks
 
 

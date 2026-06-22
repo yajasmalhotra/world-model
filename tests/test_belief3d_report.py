@@ -22,6 +22,11 @@ class Belief3DReportTest(unittest.TestCase):
                     "target_counterfactual_physical_belief_delta": 0.2,
                     "target_counterfactual_visual_belief_delta": 0.0,
                     "target_counterfactual_selectivity": 0.2,
+                    "path_mode_bounce_target_hidden_expected_distance": 0.12,
+                    "path_mode_bounce_target_hidden_nll": -2.0,
+                    "path_mode_bounce_target_reappearance_surprise": 3.0,
+                    "path_mode_bounce_target_hidden_count": 4.0,
+                    "path_mode_bounce_target_counterfactual_selectivity": 0.3,
                 },
                 "jepa::test_structured_occlusion": {
                     "target_reappearance_surprise": 8.0,
@@ -50,6 +55,8 @@ class Belief3DReportTest(unittest.TestCase):
         self.assertIn("Counterfactual selectivity", report)
         self.assertIn("Belief-JEPA evaluation includes latent diagnostics", report)
         self.assertIn("mean mixture NLL", report)
+        self.assertIn("Target Metrics By Path Mode", report)
+        self.assertIn("bounce", report)
 
     def test_report_csv_uses_union_schema(self) -> None:
         rows = flatten_summary(Path("runs/example"), self._summary())
@@ -61,6 +68,7 @@ class Belief3DReportTest(unittest.TestCase):
         self.assertIn("jepa_latent_mse", text.splitlines()[0])
         self.assertIn("jepa_mixture_nll", text.splitlines()[0])
         self.assertIn("jepa_mixture_enabled", text.splitlines()[0])
+        self.assertIn("path_mode_bounce_target_hidden_expected_distance", text.splitlines()[0])
 
 
 if __name__ == "__main__":

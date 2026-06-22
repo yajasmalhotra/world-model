@@ -153,6 +153,8 @@ Write a compact benchmark report from the latest Belief3D evaluation run:
 python scripts/report_belief3d.py --output-dir results/belief3d_report
 ```
 
+The report includes target-only aggregate metrics and path-mode slices for linear, bounce, curved, and impossible-jump hidden dynamics, so structured failures are visible instead of averaged away.
+
 For a more meaningful local MVP run:
 
 ```bash

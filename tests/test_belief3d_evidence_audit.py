@@ -134,6 +134,10 @@ class Belief3DEvidenceAuditTest(unittest.TestCase):
                                 "target_hidden_expected_distance": 0.1,
                                 "target_reappearance_surprise": 2.0,
                                 "target_hidden_entropy": 4.0,
+                                "path_mode_linear_target_hidden_expected_distance": 0.1,
+                                "path_mode_bounce_target_hidden_expected_distance": 0.2,
+                                "path_mode_curved_target_hidden_expected_distance": 0.3,
+                                "path_mode_impossible_jump_target_hidden_expected_distance": 0.4,
                             }
                         ],
                     }
