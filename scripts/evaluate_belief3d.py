@@ -113,6 +113,7 @@ def load_belief_jepa(config: Dict, device: torch.device, ckpt_path: str) -> tupl
         mixture_components=int(ckpt.get("mixture_components", model_cfg.get("jepa_mixture_components", 3))),
         structured_context=structured_enabled,
         structured_dim=int(model_cfg.get("jepa_structured_dim", 64)),
+        visual_geometry_weight=float(ckpt.get("visual_geometry_weight", model_cfg.get("jepa_visual_geometry_weight", 1.0))),
         world_min=float(data_cfg["world_min"]),
         world_max=float(data_cfg["world_max"]),
         velocity_limit=float(model_cfg["velocity_limit"]),
@@ -276,6 +277,24 @@ def jepa_particles_from_outputs(
     return particles, weights, steps
 
 
+def jepa_counterfactual_particles_from_outputs(
+    outputs: Dict[str, torch.Tensor],
+    jepa: BeliefJEPA3D,
+    object_mask: torch.Tensor,
+    horizon: int,
+) -> tuple[torch.Tensor, torch.Tensor, int]:
+    steps = min(outputs["mean"].shape[1], horizon)
+    if bool(getattr(jepa, "mixture_enabled", False)):
+        probs = torch.softmax(outputs["mixture_logits"][:, :steps], dim=-1)
+        mean = torch.sum(probs.unsqueeze(-1) * outputs["mixture_mean"][:, :steps], dim=-2)
+    else:
+        mean = outputs["mean"][:, :steps]
+    active = object_mask[:, None, :, None].to(device=mean.device, dtype=mean.dtype).expand(-1, steps, -1, 1)
+    particles = mean.unsqueeze(-2)
+    weights = active
+    return particles, weights, steps
+
+
 @torch.no_grad()
 def evaluate_split(
     loader: DataLoader,
@@ -355,18 +374,22 @@ def evaluate_split(
                     use_ema_target=jepa_ema_enabled,
                     include_target_reconstruction=False,
                 )
-                physical_cf_particles, physical_cf_weights, _ = jepa_particles_from_outputs(
+                cf_base_particles, cf_base_weights, _ = jepa_counterfactual_particles_from_outputs(
+                    outputs,
+                    jepa,
+                    object_mask,
+                    steps,
+                )
+                physical_cf_particles, physical_cf_weights, _ = jepa_counterfactual_particles_from_outputs(
                     physical_cf_outputs,
                     jepa,
                     object_mask,
-                    particle_cfg,
                     steps,
                 )
-                visual_cf_particles, visual_cf_weights, _ = jepa_particles_from_outputs(
+                visual_cf_particles, visual_cf_weights, _ = jepa_counterfactual_particles_from_outputs(
                     visual_cf_outputs,
                     jepa,
                     object_mask,
-                    particle_cfg,
                     steps,
                 )
             future_state = future_state[:, :steps]
@@ -528,8 +551,8 @@ def evaluate_split(
             if bool(getattr(jepa, "use_structured_context", False)):
                 metrics.update(
                     counterfactual_delta_metrics(
-                        particles,
-                        weights,
+                        cf_base_particles,
+                        cf_base_weights,
                         physical_cf_particles,
                         physical_cf_weights,
                         future_state,
@@ -539,8 +562,8 @@ def evaluate_split(
                 )
                 metrics.update(
                     counterfactual_delta_metrics(
-                        particles,
-                        weights,
+                        cf_base_particles,
+                        cf_base_weights,
                         visual_cf_particles,
                         visual_cf_weights,
                         future_state,
@@ -555,8 +578,8 @@ def evaluate_split(
                 if target_mask is not None:
                     metrics.update(
                         counterfactual_delta_metrics(
-                            particles,
-                            weights,
+                            cf_base_particles,
+                            cf_base_weights,
                             physical_cf_particles,
                             physical_cf_weights,
                             future_state,
@@ -566,8 +589,8 @@ def evaluate_split(
                     )
                     metrics.update(
                         counterfactual_delta_metrics(
-                            particles,
-                            weights,
+                            cf_base_particles,
+                            cf_base_weights,
                             visual_cf_particles,
                             visual_cf_weights,
                             future_state,
@@ -584,8 +607,8 @@ def evaluate_split(
                     visual_prefix = f"jepa_path_mode_{path_mode}_target_counterfactual_visual"
                     metrics.update(
                         counterfactual_delta_metrics(
-                            particles,
-                            weights,
+                            cf_base_particles,
+                            cf_base_weights,
                             physical_cf_particles,
                             physical_cf_weights,
                             future_state,
@@ -595,8 +618,8 @@ def evaluate_split(
                     )
                     metrics.update(
                         counterfactual_delta_metrics(
-                            particles,
-                            weights,
+                            cf_base_particles,
+                            cf_base_weights,
                             visual_cf_particles,
                             visual_cf_weights,
                             future_state,

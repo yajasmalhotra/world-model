@@ -61,6 +61,7 @@ model3d:
   jepa_mixture_components: 3
   jepa_structured_context: true
   jepa_structured_dim: 64
+  jepa_visual_geometry_weight: 0.0
 
 train_belief3d:
   lr: 0.001
@@ -74,6 +75,7 @@ train_belief3d:
   belief_weight: 0.5
   mixture_belief_weight: 0.25
   target_recon_weight: 0.1
+  visual_invariance_weight: 0.1
   sigreg_weight: 0.05
   sigreg_sketches: 16
   sigreg_scale: 1.0

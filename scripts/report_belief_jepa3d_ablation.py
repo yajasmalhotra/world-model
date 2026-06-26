@@ -108,6 +108,7 @@ def checkpoint_metadata(name: str, path: Path, device: torch.device) -> Dict[str
     sigreg_weight = ckpt.get("sigreg_weight", train_cfg.get("sigreg_weight"))
     sigreg_sketches = ckpt.get("sigreg_sketches", train_cfg.get("sigreg_sketches"))
     sigreg_scale = ckpt.get("sigreg_scale", train_cfg.get("sigreg_scale"))
+    visual_invariance_weight = ckpt.get("visual_invariance_weight", train_cfg.get("visual_invariance_weight"))
     return {
         "variant": name,
         "checkpoint": str(path),
@@ -117,10 +118,12 @@ def checkpoint_metadata(name: str, path: Path, device: torch.device) -> Dict[str
         "sigreg_weight": numeric(sigreg_weight),
         "sigreg_sketches": numeric(sigreg_sketches),
         "sigreg_scale": numeric(sigreg_scale),
+        "visual_invariance_weight": numeric(visual_invariance_weight),
         "target_encoder": ckpt.get("target_encoder", "legacy_per_state"),
         "belief_head": ckpt.get("belief_head", "single_gaussian"),
         "mixture_components": numeric(ckpt.get("mixture_components")),
         "structured_context": bool(ckpt.get("structured_context", False)),
+        "visual_geometry_weight": numeric(ckpt.get("visual_geometry_weight", 1.0)),
         "context_encoder": ckpt.get("context_encoder", "rgb"),
         "epoch": ckpt.get("epoch"),
         "best_metric": numeric(ckpt.get("best_metric")),
@@ -226,8 +229,8 @@ def markdown_report(rows: List[Dict[str, object]], claims: Dict[str, object]) ->
         "",
         "## Variants",
         "",
-        "| variant | EMA | SIGReg | target encoder | belief head | structured | RGB-D | checkpoint |",
-        "| --- | ---: | ---: | --- | --- | ---: | ---: | --- |",
+        "| variant | EMA | SIGReg | visual inv | visual geom | target encoder | belief head | structured | RGB-D | checkpoint |",
+        "| --- | ---: | ---: | ---: | ---: | --- | --- | ---: | ---: | --- |",
     ]
     seen = set()
     for row in rows:
@@ -242,6 +245,8 @@ def markdown_report(rows: List[Dict[str, object]], claims: Dict[str, object]) ->
                     variant,
                     str(bool(row.get("ema_enabled"))),
                     format_float(row.get("sigreg_weight")),
+                    format_float(row.get("visual_invariance_weight")),
+                    format_float(row.get("visual_geometry_weight")),
                     str(row.get("target_encoder", "")),
                     str(row.get("belief_head", "")),
                     str(bool(row.get("structured_context"))),

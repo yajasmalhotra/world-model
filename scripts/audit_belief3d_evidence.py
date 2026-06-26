@@ -359,6 +359,8 @@ def audit_report(report_json_path: Path) -> List[Check]:
         is_finite_number(jepa.get("structured_physical_delta"))
         and is_finite_number(jepa.get("structured_visual_delta"))
         and is_finite_number(jepa.get("structured_selectivity"))
+        and float(jepa["structured_physical_delta"]) > float(jepa["structured_visual_delta"])
+        and float(jepa["structured_selectivity"]) > 0.0
     ):
         checks.append(
             pass_check(

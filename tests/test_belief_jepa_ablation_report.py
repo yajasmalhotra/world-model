@@ -19,6 +19,8 @@ class BeliefJEPA3DAblationReportTest(unittest.TestCase):
                 "ema_enabled": True,
                 "rgbd": False,
                 "sigreg_weight": 0.05,
+                "visual_invariance_weight": 0.1,
+                "visual_geometry_weight": 0.0,
                 "target_encoder": "bidirectional_temporal_state6_occ",
                 "belief_head": "gaussian_mixture_3",
                 "structured_context": True,
@@ -40,6 +42,8 @@ class BeliefJEPA3DAblationReportTest(unittest.TestCase):
                 "ema_enabled": False,
                 "rgbd": False,
                 "sigreg_weight": 0.05,
+                "visual_invariance_weight": 0.1,
+                "visual_geometry_weight": 0.0,
                 "target_encoder": "bidirectional_temporal_state6_occ",
                 "belief_head": "gaussian_mixture_3",
                 "structured_context": True,
@@ -61,6 +65,8 @@ class BeliefJEPA3DAblationReportTest(unittest.TestCase):
                 "ema_enabled": True,
                 "rgbd": False,
                 "sigreg_weight": 0.0,
+                "visual_invariance_weight": 0.1,
+                "visual_geometry_weight": 0.0,
                 "target_encoder": "bidirectional_temporal_state6_occ",
                 "belief_head": "gaussian_mixture_3",
                 "structured_context": True,
@@ -100,6 +106,7 @@ class BeliefJEPA3DAblationReportTest(unittest.TestCase):
         self.assertIn("EMA/SIGReg Ablation", report)
         self.assertIn("no_sigreg", report)
         self.assertIn("JEPA cf selectivity", report)
+        self.assertIn("visual inv", report)
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "ablation.csv"
             write_csv(path, rows)

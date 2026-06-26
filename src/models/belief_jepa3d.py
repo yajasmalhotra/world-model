@@ -28,6 +28,7 @@ class BeliefJEPA3D(nn.Module):
         mixture_components: int = 3,
         structured_context: bool = False,
         structured_dim: int = 64,
+        visual_geometry_weight: float = 1.0,
         world_min: float = -1.0,
         world_max: float = 1.0,
         velocity_limit: float = 0.16,
@@ -41,6 +42,7 @@ class BeliefJEPA3D(nn.Module):
         self.mixture_components = max(1, int(mixture_components))
         self.use_structured_context = bool(structured_context)
         self.structured_dim = int(structured_dim)
+        self.visual_geometry_weight = float(visual_geometry_weight)
         self.world_min = float(world_min)
         self.world_max = float(world_max)
         self.velocity_limit = float(velocity_limit)
@@ -203,8 +205,11 @@ class BeliefJEPA3D(nn.Module):
         device: torch.device,
         dtype: torch.dtype,
     ) -> torch.Tensor:
+        visual_occluders = structured_context.get("visual_occluders")
+        if visual_occluders is not None:
+            visual_occluders = self.visual_geometry_weight * visual_occluders
         groups = [
-            self._geometry_group_features(structured_context.get("visual_occluders"), 0, batch_size, device, dtype),
+            self._geometry_group_features(visual_occluders, 0, batch_size, device, dtype),
             self._geometry_group_features(structured_context.get("physical_obstacles"), 1, batch_size, device, dtype),
             self._geometry_group_features(structured_context.get("solid_screens"), 2, batch_size, device, dtype),
         ]

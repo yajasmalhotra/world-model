@@ -17,6 +17,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.data3d.dataset3d import SyntheticScene3DDataset, collate_scenes3d
+from src.eval.counterfactual import move_boxes_to_far_corner
 from src.models.belief_jepa3d import BeliefJEPA3D, belief_jepa_loss
 from src.train.utils import append_metrics, get_device, init_run_dir, load_config, save_checkpoint, save_summary, set_seed
 
@@ -59,6 +60,22 @@ def structured_context(batch: Dict, device: torch.device, enabled: bool) -> Dict
     }
 
 
+def visual_counterfactual_structured_context(
+    base: Dict[str, torch.Tensor] | None,
+    world_min: float,
+    world_max: float,
+) -> Dict[str, torch.Tensor] | None:
+    if base is None:
+        return None
+    changed = {key: value.clone() for key, value in base.items()}
+    changed["visual_occluders"] = move_boxes_to_far_corner(
+        changed["visual_occluders"],
+        world_min=world_min,
+        world_max=world_max,
+    )
+    return changed
+
+
 def build_model(config: Dict, device: torch.device, rgbd: bool) -> BeliefJEPA3D:
     model_cfg = config["model3d"]
     data_cfg = config["data3d"]
@@ -73,6 +90,7 @@ def build_model(config: Dict, device: torch.device, rgbd: bool) -> BeliefJEPA3D:
         mixture_components=int(model_cfg.get("jepa_mixture_components", 3)),
         structured_context=bool(model_cfg.get("jepa_structured_context", True)),
         structured_dim=int(model_cfg.get("jepa_structured_dim", 64)),
+        visual_geometry_weight=float(model_cfg.get("jepa_visual_geometry_weight", 1.0)),
         world_min=float(data_cfg["world_min"]),
         world_max=float(data_cfg["world_max"]),
         velocity_limit=float(model_cfg["velocity_limit"]),
@@ -90,6 +108,37 @@ def loss_weights(train_cfg: Dict) -> Dict[str, float | int]:
         "sigreg_weight": float(train_cfg.get("sigreg_weight", 0.0)),
         "sigreg_sketches": int(train_cfg.get("sigreg_sketches", 16)),
         "sigreg_scale": float(train_cfg.get("sigreg_scale", 1.0)),
+    }
+
+
+def visual_invariance_loss(
+    base_outputs: Dict[str, torch.Tensor],
+    visual_outputs: Dict[str, torch.Tensor],
+    future_mask: torch.Tensor,
+) -> Dict[str, torch.Tensor]:
+    steps = min(base_outputs["mean"].shape[1], visual_outputs["mean"].shape[1], future_mask.shape[1])
+    mask = future_mask[:, :steps].unsqueeze(-1)
+    denom = mask.sum().clamp_min(1.0)
+    latent_mse = (((base_outputs["pred_latent"][:, :steps] - visual_outputs["pred_latent"][:, :steps]) ** 2) * mask).sum() / denom
+    mean_mse = (((base_outputs["mean"][:, :steps] - visual_outputs["mean"][:, :steps]) ** 2) * mask).sum() / denom
+    std_mse = (((base_outputs["log_std"][:, :steps] - visual_outputs["log_std"][:, :steps]) ** 2) * mask).sum() / denom
+    mixture_mean_mse = (
+        ((base_outputs["mixture_mean"][:, :steps] - visual_outputs["mixture_mean"][:, :steps]) ** 2)
+        * mask.unsqueeze(-2)
+    ).sum() / denom
+    mixture_std_mse = (
+        ((base_outputs["mixture_log_std"][:, :steps] - visual_outputs["mixture_log_std"][:, :steps]) ** 2)
+        * mask.unsqueeze(-2)
+    ).sum() / denom
+    mixture_logits_mse = (
+        ((base_outputs["mixture_logits"][:, :steps] - visual_outputs["mixture_logits"][:, :steps]) ** 2)
+        * future_mask[:, :steps].unsqueeze(-1)
+    ).sum() / future_mask[:, :steps].sum().clamp_min(1.0)
+    total = latent_mse + mean_mse + std_mse + 0.25 * (mixture_mean_mse + mixture_std_mse + mixture_logits_mse)
+    return {
+        "visual_invariance": total,
+        "visual_invariance_latent": latent_mse,
+        "visual_invariance_mean": mean_mse,
     }
 
 
@@ -194,6 +243,22 @@ def main() -> None:
             future_mask = batch["future_mask"].to(device)
             outputs = model(frames, future_state=future_state, structured_context=struct, use_ema_target=ema_enabled)
             losses = belief_jepa_loss(outputs, future_state, future_mask, **loss_cfg)
+            visual_invariance_weight = float(train_cfg.get("visual_invariance_weight", 0.0))
+            if visual_invariance_weight > 0.0 and bool(model.use_structured_context):
+                visual_struct = visual_counterfactual_structured_context(
+                    struct,
+                    world_min=float(data_cfg.get("world_min", -1.0)),
+                    world_max=float(data_cfg.get("world_max", 1.0)),
+                )
+                visual_outputs = model(
+                    frames,
+                    structured_context=visual_struct,
+                    use_ema_target=ema_enabled,
+                    include_target_reconstruction=False,
+                )
+                invariance_losses = visual_invariance_loss(outputs, visual_outputs, future_mask)
+                losses.update(invariance_losses)
+                losses["total"] = losses["total"] + visual_invariance_weight * invariance_losses["visual_invariance"]
             optimizer.zero_grad()
             losses["total"].backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
@@ -215,6 +280,7 @@ def main() -> None:
             "sigreg_sketches": float(loss_cfg["sigreg_sketches"]),
             "sigreg_scale": float(loss_cfg["sigreg_scale"]),
             "mixture_belief_weight": float(loss_cfg["mixture_belief_weight"]),
+            "visual_invariance_weight": float(train_cfg.get("visual_invariance_weight", 0.0)),
             "mixture_components": float(model.mixture_components),
             "structured_context": float(model.use_structured_context),
             "global_step": float(global_step),
@@ -241,10 +307,12 @@ def main() -> None:
                     "sigreg_sketches": int(loss_cfg["sigreg_sketches"]),
                     "sigreg_scale": float(loss_cfg["sigreg_scale"]),
                     "mixture_belief_weight": float(loss_cfg["mixture_belief_weight"]),
+                    "visual_invariance_weight": float(train_cfg.get("visual_invariance_weight", 0.0)),
                     "target_encoder": TARGET_ENCODER_KIND,
                     "mixture_components": int(model.mixture_components),
                     "belief_head": f"gaussian_mixture_{int(model.mixture_components)}",
                     "structured_context": bool(model.use_structured_context),
+                    "visual_geometry_weight": float(model.visual_geometry_weight),
                     "context_encoder": context_encoder_name(bool(args.rgbd), bool(model.use_structured_context)),
                 },
             )
@@ -264,10 +332,12 @@ def main() -> None:
             "sigreg_sketches": int(loss_cfg["sigreg_sketches"]),
             "sigreg_scale": float(loss_cfg["sigreg_scale"]),
             "mixture_belief_weight": float(loss_cfg["mixture_belief_weight"]),
+            "visual_invariance_weight": float(train_cfg.get("visual_invariance_weight", 0.0)),
             "target_encoder": TARGET_ENCODER_KIND,
             "mixture_components": int(model.mixture_components),
             "belief_head": f"gaussian_mixture_{int(model.mixture_components)}",
             "structured_context": bool(model.use_structured_context),
+            "visual_geometry_weight": float(model.visual_geometry_weight),
             "context_encoder": context_encoder_name(bool(args.rgbd), bool(model.use_structured_context)),
         },
     )
