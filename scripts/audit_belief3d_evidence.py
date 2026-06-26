@@ -355,6 +355,21 @@ def audit_report(report_json_path: Path) -> List[Check]:
     else:
         checks.append(fail_check("report.jepa_diagnostics", f"Invalid JEPA diagnostics: {jepa}"))
 
+    if (
+        is_finite_number(jepa.get("structured_physical_delta"))
+        and is_finite_number(jepa.get("structured_visual_delta"))
+        and is_finite_number(jepa.get("structured_selectivity"))
+    ):
+        checks.append(
+            pass_check(
+                "report.jepa_counterfactual_diagnostics",
+                f"physical={float(jepa['structured_physical_delta']):.4f}, "
+                f"visual={float(jepa['structured_visual_delta']):.4f}.",
+            )
+        )
+    else:
+        checks.append(fail_check("report.jepa_counterfactual_diagnostics", f"Invalid JEPA counterfactuals: {jepa}"))
+
     rows = report.get("rows", [])
     required_row_metrics = {"target_hidden_expected_distance", "target_reappearance_surprise", "target_hidden_entropy"}
     if rows and all(any(metric in row for row in rows) for metric in required_row_metrics):

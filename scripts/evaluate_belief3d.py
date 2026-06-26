@@ -164,6 +164,32 @@ def structured_context(batch: Dict, device: torch.device, enabled: bool) -> Dict
     }
 
 
+def counterfactual_structured_context(
+    base: Dict[str, torch.Tensor] | None,
+    kind: str,
+    world_min: float,
+    world_max: float,
+) -> Dict[str, torch.Tensor] | None:
+    if base is None:
+        return None
+    changed = {key: value.clone() for key, value in base.items()}
+    if kind == "physical":
+        changed["physical_obstacles"] = move_boxes_to_far_corner(
+            changed["physical_obstacles"],
+            world_min=world_min,
+            world_max=world_max,
+        )
+    elif kind == "visual":
+        changed["visual_occluders"] = move_boxes_to_far_corner(
+            changed["visual_occluders"],
+            world_min=world_min,
+            world_max=world_max,
+        )
+    else:
+        raise ValueError(f"Unknown structured counterfactual kind: {kind}")
+    return changed
+
+
 def target_object_mask(batch: Dict, future_mask: torch.Tensor) -> Optional[torch.Tensor]:
     metadata = batch.get("metadata")
     if not metadata:
@@ -224,6 +250,32 @@ def seeded_geometry_rollout(
     )
 
 
+def jepa_particles_from_outputs(
+    outputs: Dict[str, torch.Tensor],
+    jepa: BeliefJEPA3D,
+    object_mask: torch.Tensor,
+    particle_cfg: ParticleBeliefConfig,
+    horizon: int,
+) -> tuple[torch.Tensor, torch.Tensor, int]:
+    steps = min(outputs["mean"].shape[1], horizon)
+    if bool(getattr(jepa, "mixture_enabled", False)):
+        particles, weights = particles_from_gaussian_mixture_sequence(
+            outputs["mixture_logits"][:, :steps],
+            outputs["mixture_mean"][:, :steps],
+            outputs["mixture_log_std"][:, :steps],
+            object_mask,
+            cfg=particle_cfg,
+        )
+    else:
+        particles, weights = particles_from_gaussian_sequence(
+            outputs["mean"][:, :steps],
+            outputs["log_std"][:, :steps],
+            object_mask,
+            cfg=particle_cfg,
+        )
+    return particles, weights, steps
+
+
 @torch.no_grad()
 def evaluate_split(
     loader: DataLoader,
@@ -268,28 +320,54 @@ def evaluate_split(
         elif mode == "jepa":
             if jepa is None:
                 raise RuntimeError("JEPA mode requires a Belief-JEPA checkpoint.")
+            frames = context_frames(batch, device, jepa_rgbd)
+            base_structured_context = structured_context(batch, device, bool(jepa.use_structured_context))
             outputs = jepa(
-                context_frames(batch, device, jepa_rgbd),
+                frames,
                 future_state=future_state,
-                structured_context=structured_context(batch, device, bool(jepa.use_structured_context)),
+                structured_context=base_structured_context,
                 use_ema_target=jepa_ema_enabled,
                 include_target_reconstruction=False,
             )
-            steps = min(outputs["mean"].shape[1], horizon)
-            if bool(getattr(jepa, "mixture_enabled", False)):
-                particles, weights = particles_from_gaussian_mixture_sequence(
-                    outputs["mixture_logits"][:, :steps],
-                    outputs["mixture_mean"][:, :steps],
-                    outputs["mixture_log_std"][:, :steps],
-                    object_mask,
-                    cfg=particle_cfg,
+            particles, weights, steps = jepa_particles_from_outputs(outputs, jepa, object_mask, particle_cfg, horizon)
+            if bool(jepa.use_structured_context):
+                physical_structured_context = counterfactual_structured_context(
+                    base_structured_context,
+                    "physical",
+                    world_min=float(data_cfg.get("world_min", -1.0)),
+                    world_max=float(data_cfg.get("world_max", 1.0)),
                 )
-            else:
-                particles, weights = particles_from_gaussian_sequence(
-                    outputs["mean"][:, :steps],
-                    outputs["log_std"][:, :steps],
+                visual_structured_context = counterfactual_structured_context(
+                    base_structured_context,
+                    "visual",
+                    world_min=float(data_cfg.get("world_min", -1.0)),
+                    world_max=float(data_cfg.get("world_max", 1.0)),
+                )
+                physical_cf_outputs = jepa(
+                    frames,
+                    structured_context=physical_structured_context,
+                    use_ema_target=jepa_ema_enabled,
+                    include_target_reconstruction=False,
+                )
+                visual_cf_outputs = jepa(
+                    frames,
+                    structured_context=visual_structured_context,
+                    use_ema_target=jepa_ema_enabled,
+                    include_target_reconstruction=False,
+                )
+                physical_cf_particles, physical_cf_weights, _ = jepa_particles_from_outputs(
+                    physical_cf_outputs,
+                    jepa,
                     object_mask,
-                    cfg=particle_cfg,
+                    particle_cfg,
+                    steps,
+                )
+                visual_cf_particles, visual_cf_weights, _ = jepa_particles_from_outputs(
+                    visual_cf_outputs,
+                    jepa,
+                    object_mask,
+                    particle_cfg,
+                    steps,
                 )
             future_state = future_state[:, :steps]
             future_mask = future_mask[:, :steps]
@@ -447,6 +525,88 @@ def evaluate_split(
                     metrics[f"{physical_prefix}_belief_delta"] - metrics[f"{visual_prefix}_belief_delta"]
                 )
         if mode == "jepa":
+            if bool(getattr(jepa, "use_structured_context", False)):
+                metrics.update(
+                    counterfactual_delta_metrics(
+                        particles,
+                        weights,
+                        physical_cf_particles,
+                        physical_cf_weights,
+                        future_state,
+                        future_mask,
+                        prefix="jepa_counterfactual_physical",
+                    )
+                )
+                metrics.update(
+                    counterfactual_delta_metrics(
+                        particles,
+                        weights,
+                        visual_cf_particles,
+                        visual_cf_weights,
+                        future_state,
+                        future_mask,
+                        prefix="jepa_counterfactual_visual",
+                    )
+                )
+                metrics["jepa_counterfactual_selectivity"] = (
+                    metrics["jepa_counterfactual_physical_belief_delta"]
+                    - metrics["jepa_counterfactual_visual_belief_delta"]
+                )
+                if target_mask is not None:
+                    metrics.update(
+                        counterfactual_delta_metrics(
+                            particles,
+                            weights,
+                            physical_cf_particles,
+                            physical_cf_weights,
+                            future_state,
+                            target_mask,
+                            prefix="jepa_target_counterfactual_physical",
+                        )
+                    )
+                    metrics.update(
+                        counterfactual_delta_metrics(
+                            particles,
+                            weights,
+                            visual_cf_particles,
+                            visual_cf_weights,
+                            future_state,
+                            target_mask,
+                            prefix="jepa_target_counterfactual_visual",
+                        )
+                    )
+                    metrics["jepa_target_counterfactual_selectivity"] = (
+                        metrics["jepa_target_counterfactual_physical_belief_delta"]
+                        - metrics["jepa_target_counterfactual_visual_belief_delta"]
+                    )
+                for path_mode, path_mask in path_mode_masks.items():
+                    physical_prefix = f"jepa_path_mode_{path_mode}_target_counterfactual_physical"
+                    visual_prefix = f"jepa_path_mode_{path_mode}_target_counterfactual_visual"
+                    metrics.update(
+                        counterfactual_delta_metrics(
+                            particles,
+                            weights,
+                            physical_cf_particles,
+                            physical_cf_weights,
+                            future_state,
+                            path_mask,
+                            prefix=physical_prefix,
+                        )
+                    )
+                    metrics.update(
+                        counterfactual_delta_metrics(
+                            particles,
+                            weights,
+                            visual_cf_particles,
+                            visual_cf_weights,
+                            future_state,
+                            path_mask,
+                            prefix=visual_prefix,
+                        )
+                    )
+                    metrics[f"jepa_path_mode_{path_mode}_target_counterfactual_selectivity"] = (
+                        metrics[f"{physical_prefix}_belief_delta"] - metrics[f"{visual_prefix}_belief_delta"]
+                    )
             metrics.update({f"jepa_{key}": float(value.detach().cpu().item()) for key, value in diagnostics.items()})
         rows.append(metrics)
     return summarize_metric_rows(rows)

@@ -128,6 +128,9 @@ class Belief3DEvidenceAuditTest(unittest.TestCase):
                                 "mean_latent_mse": 1.2,
                                 "mean_mixture_nll": 0.8,
                                 "mean_mixture_entropy": 1.0,
+                                "structured_physical_delta": 0.07,
+                                "structured_visual_delta": 0.01,
+                                "structured_selectivity": 0.06,
                             },
                         },
                         "rows": [

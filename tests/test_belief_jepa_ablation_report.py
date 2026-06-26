@@ -29,6 +29,7 @@ class BeliefJEPA3DAblationReportTest(unittest.TestCase):
                 "jepa_mixture_nll": 1.0,
                 "jepa_mixture_entropy": 0.9,
                 "jepa_pred_target_cosine": 0.3,
+                "jepa_target_counterfactual_selectivity": 0.06,
                 "jepa_target_latent_std": 0.14,
                 "jepa_pred_latent_std": 0.06,
             },
@@ -49,6 +50,7 @@ class BeliefJEPA3DAblationReportTest(unittest.TestCase):
                 "jepa_mixture_nll": 1.2,
                 "jepa_mixture_entropy": 0.8,
                 "jepa_pred_target_cosine": 0.2,
+                "jepa_target_counterfactual_selectivity": -0.01,
                 "jepa_target_latent_std": 0.15,
                 "jepa_pred_latent_std": 0.05,
             },
@@ -69,6 +71,7 @@ class BeliefJEPA3DAblationReportTest(unittest.TestCase):
                 "jepa_mixture_nll": 1.1,
                 "jepa_mixture_entropy": 0.7,
                 "jepa_pred_target_cosine": 0.25,
+                "jepa_target_counterfactual_selectivity": 0.02,
                 "jepa_target_latent_std": 0.1,
                 "jepa_pred_latent_std": 0.04,
             },
@@ -79,6 +82,10 @@ class BeliefJEPA3DAblationReportTest(unittest.TestCase):
         self.assertEqual(claims["variant_count"], 3)
         self.assertEqual(
             claims["best_by_split"]["test_structured_occlusion"]["target_reappearance_surprise"]["variant"],
+            "ema_sigreg",
+        )
+        self.assertEqual(
+            claims["best_by_split"]["test_structured_occlusion"]["jepa_target_counterfactual_selectivity"]["variant"],
             "ema_sigreg",
         )
         comparisons = claims["comparisons"]
@@ -92,6 +99,7 @@ class BeliefJEPA3DAblationReportTest(unittest.TestCase):
         report = markdown_report(rows, claims)
         self.assertIn("EMA/SIGReg Ablation", report)
         self.assertIn("no_sigreg", report)
+        self.assertIn("JEPA cf selectivity", report)
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "ablation.csv"
             write_csv(path, rows)
@@ -99,6 +107,7 @@ class BeliefJEPA3DAblationReportTest(unittest.TestCase):
         self.assertIn("sigreg_weight", header)
         self.assertIn("jepa_pred_target_cosine", header)
         self.assertIn("jepa_mixture_nll", header)
+        self.assertIn("jepa_target_counterfactual_selectivity", header)
         self.assertIn("structured_context", header)
 
     def test_evidence_audit_accepts_ablation_report(self) -> None:

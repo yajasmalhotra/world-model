@@ -30,6 +30,7 @@ TABLE_METRICS = [
     "jepa_pred_target_cosine",
     "jepa_target_latent_std",
     "jepa_pred_latent_std",
+    "jepa_target_counterfactual_selectivity",
 ]
 LOWER_IS_BETTER = [
     "target_hidden_expected_distance",
@@ -183,6 +184,12 @@ def summarize_claims(rows: List[Dict[str, object]]) -> Dict[str, object]:
                 "variant": cosine_best.get("variant"),
                 "value": numeric(cosine_best.get("jepa_pred_target_cosine")),
             }
+        selectivity_best = best_variant(rows, split, "jepa_target_counterfactual_selectivity", higher_is_better=True)
+        if selectivity_best is not None:
+            split_best["jepa_target_counterfactual_selectivity"] = {
+                "variant": selectivity_best.get("variant"),
+                "value": numeric(selectivity_best.get("jepa_target_counterfactual_selectivity")),
+            }
         claims["best_by_split"][split] = split_best
 
     comparisons = []
@@ -250,8 +257,8 @@ def markdown_report(rows: List[Dict[str, object]], claims: Dict[str, object]) ->
             "",
             "## Targeted Split Metrics",
             "",
-            "| split | variant | target dist | reappear surprise | target NLL | latent MSE | mix NLL | mix entropy | cosine | target std | pred std |",
-            "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+            "| split | variant | target dist | reappear surprise | target NLL | latent MSE | mix NLL | mix entropy | cosine | JEPA cf selectivity | target std | pred std |",
+            "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
         ]
     )
     for row in sorted(rows, key=lambda item: (str(item.get("split")), str(item.get("variant")))):
@@ -268,6 +275,7 @@ def markdown_report(rows: List[Dict[str, object]], claims: Dict[str, object]) ->
                     format_float(row.get("jepa_mixture_nll")),
                     format_float(row.get("jepa_mixture_entropy")),
                     format_float(row.get("jepa_pred_target_cosine")),
+                    format_float(row.get("jepa_target_counterfactual_selectivity")),
                     format_float(row.get("jepa_target_latent_std")),
                     format_float(row.get("jepa_pred_latent_std")),
                 ]

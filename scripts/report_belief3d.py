@@ -29,6 +29,9 @@ IMPORTANT_METRICS = [
     "jepa_ema_enabled",
     "jepa_mixture_enabled",
     "jepa_structured_context",
+    "jepa_target_counterfactual_physical_belief_delta",
+    "jepa_target_counterfactual_visual_belief_delta",
+    "jepa_target_counterfactual_selectivity",
 ]
 
 
@@ -145,6 +148,7 @@ def summarize_claims(rows: List[Dict[str, object]]) -> Dict[str, object]:
             }
     jepa_rows = [row for row in rows if row.get("mode") == "jepa"]
     if jepa_rows:
+        structured_jepa = row_for(rows, structured, "jepa")
         claims["jepa"] = {
             "ema_enabled": any(numeric(row, "jepa_ema_enabled") == 1.0 for row in jepa_rows),
             "mixture_enabled": any(numeric(row, "jepa_mixture_enabled") == 1.0 for row in jepa_rows),
@@ -153,6 +157,20 @@ def summarize_claims(rows: List[Dict[str, object]]) -> Dict[str, object]:
             "mean_mixture_nll": mean_metric(jepa_rows, "jepa_mixture_nll"),
             "mean_mixture_entropy": mean_metric(jepa_rows, "jepa_mixture_entropy"),
         }
+        if structured_jepa:
+            claims["jepa"].update(
+                {
+                    "structured_physical_delta": numeric(
+                        structured_jepa,
+                        "jepa_target_counterfactual_physical_belief_delta",
+                    ),
+                    "structured_visual_delta": numeric(
+                        structured_jepa,
+                        "jepa_target_counterfactual_visual_belief_delta",
+                    ),
+                    "structured_selectivity": numeric(structured_jepa, "jepa_target_counterfactual_selectivity"),
+                }
+            )
     return claims
 
 
@@ -224,7 +242,8 @@ def markdown_report(run_dir: Path, rows: List[Dict[str, object]], claims: Dict[s
             "- Belief-JEPA evaluation includes latent diagnostics "
             f"(EMA enabled: `{bool(jepa.get('ema_enabled'))}`, mean latent MSE: {format_float(jepa.get('mean_latent_mse'))}, "
             f"mixture enabled: `{bool(jepa.get('mixture_enabled'))}`, structured context: `{bool(jepa.get('structured_context'))}`, "
-            f"mean mixture NLL: {format_float(jepa.get('mean_mixture_nll'))})."
+            f"mean mixture NLL: {format_float(jepa.get('mean_mixture_nll'))}, "
+            f"JEPA cf selectivity: {format_float(jepa.get('structured_selectivity'))})."
         )
     if len(lines) == 5:
         lines.append("- No structured claims were available in this run.")

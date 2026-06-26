@@ -4,6 +4,7 @@ import unittest
 
 import torch
 
+from scripts.evaluate_belief3d import counterfactual_structured_context
 from src.eval.counterfactual import counterfactual_delta_metrics, move_boxes_to_far_corner
 from src.models.belief_state import ParticleBeliefConfig, rollout_geometry_aware_particle_belief
 
@@ -74,6 +75,24 @@ class CounterfactualSensitivityTest(unittest.TestCase):
         self.assertGreater(physical["physical_belief_delta"], 0.05)
         self.assertAlmostEqual(visual["visual_belief_delta"], 0.0, places=6)
         self.assertGreater(physical["physical_belief_delta"] - visual["visual_belief_delta"], 0.05)
+
+    def test_structured_jepa_counterfactuals_change_only_requested_geometry_group(self) -> None:
+        context = {
+            "obs_state": torch.zeros(1, 2, 1, 12),
+            "obs_mask": torch.ones(1, 2, 1),
+            "visual_occluders": torch.tensor([[[0.1, 0.1, 0.1, 0.2, 0.2, 0.2]]]),
+            "physical_obstacles": torch.tensor([[[-0.2, -0.2, -0.2, -0.1, -0.1, -0.1]]]),
+            "solid_screens": torch.zeros(1, 1, 6),
+        }
+
+        physical = counterfactual_structured_context(context, "physical", world_min=-1.0, world_max=1.0)
+        visual = counterfactual_structured_context(context, "visual", world_min=-1.0, world_max=1.0)
+
+        self.assertTrue(torch.equal(physical["visual_occluders"], context["visual_occluders"]))
+        self.assertFalse(torch.equal(physical["physical_obstacles"], context["physical_obstacles"]))
+        self.assertTrue(torch.equal(visual["physical_obstacles"], context["physical_obstacles"]))
+        self.assertFalse(torch.equal(visual["visual_occluders"], context["visual_occluders"]))
+        self.assertTrue(torch.equal(context["physical_obstacles"], torch.tensor([[[-0.2, -0.2, -0.2, -0.1, -0.1, -0.1]]])))
 
 
 if __name__ == "__main__":

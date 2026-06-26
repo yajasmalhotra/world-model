@@ -36,6 +36,9 @@ class Belief3DReportTest(unittest.TestCase):
                     "jepa_ema_enabled": 1.0,
                     "jepa_mixture_enabled": 1.0,
                     "jepa_structured_context": 1.0,
+                    "jepa_target_counterfactual_physical_belief_delta": 0.07,
+                    "jepa_target_counterfactual_visual_belief_delta": 0.01,
+                    "jepa_target_counterfactual_selectivity": 0.06,
                 },
             },
         }
@@ -51,12 +54,14 @@ class Belief3DReportTest(unittest.TestCase):
         self.assertTrue(claims["jepa"]["mixture_enabled"])
         self.assertTrue(claims["jepa"]["structured_context"])
         self.assertEqual(claims["jepa"]["mean_mixture_nll"], 2.5)
+        self.assertEqual(claims["jepa"]["structured_selectivity"], 0.06)
 
         report = markdown_report(run_dir, rows, claims)
         self.assertIn("Geometry-aware belief reduces", report)
         self.assertIn("Counterfactual selectivity", report)
         self.assertIn("Belief-JEPA evaluation includes latent diagnostics", report)
         self.assertIn("mean mixture NLL", report)
+        self.assertIn("JEPA cf selectivity", report)
         self.assertIn("structured context", report)
         self.assertIn("Target Metrics By Path Mode", report)
         self.assertIn("bounce", report)
@@ -72,6 +77,7 @@ class Belief3DReportTest(unittest.TestCase):
         self.assertIn("jepa_mixture_nll", text.splitlines()[0])
         self.assertIn("jepa_mixture_enabled", text.splitlines()[0])
         self.assertIn("jepa_structured_context", text.splitlines()[0])
+        self.assertIn("jepa_target_counterfactual_selectivity", text.splitlines()[0])
         self.assertIn("path_mode_bounce_target_hidden_expected_distance", text.splitlines()[0])
 
 
