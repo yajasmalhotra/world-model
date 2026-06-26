@@ -119,6 +119,8 @@ def checkpoint_metadata(name: str, path: Path, device: torch.device) -> Dict[str
         "target_encoder": ckpt.get("target_encoder", "legacy_per_state"),
         "belief_head": ckpt.get("belief_head", "single_gaussian"),
         "mixture_components": numeric(ckpt.get("mixture_components")),
+        "structured_context": bool(ckpt.get("structured_context", False)),
+        "context_encoder": ckpt.get("context_encoder", "rgb"),
         "epoch": ckpt.get("epoch"),
         "best_metric": numeric(ckpt.get("best_metric")),
     }
@@ -217,8 +219,8 @@ def markdown_report(rows: List[Dict[str, object]], claims: Dict[str, object]) ->
         "",
         "## Variants",
         "",
-        "| variant | EMA | SIGReg | target encoder | belief head | RGB-D | checkpoint |",
-        "| --- | ---: | ---: | --- | --- | ---: | --- |",
+        "| variant | EMA | SIGReg | target encoder | belief head | structured | RGB-D | checkpoint |",
+        "| --- | ---: | ---: | --- | --- | ---: | ---: | --- |",
     ]
     seen = set()
     for row in rows:
@@ -235,6 +237,7 @@ def markdown_report(rows: List[Dict[str, object]], claims: Dict[str, object]) ->
                     format_float(row.get("sigreg_weight")),
                     str(row.get("target_encoder", "")),
                     str(row.get("belief_head", "")),
+                    str(bool(row.get("structured_context"))),
                     str(bool(row.get("rgbd"))),
                     f"`{row.get('checkpoint')}`",
                 ]

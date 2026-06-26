@@ -28,6 +28,7 @@ IMPORTANT_METRICS = [
     "jepa_pred_target_cosine",
     "jepa_ema_enabled",
     "jepa_mixture_enabled",
+    "jepa_structured_context",
 ]
 
 
@@ -147,6 +148,7 @@ def summarize_claims(rows: List[Dict[str, object]]) -> Dict[str, object]:
         claims["jepa"] = {
             "ema_enabled": any(numeric(row, "jepa_ema_enabled") == 1.0 for row in jepa_rows),
             "mixture_enabled": any(numeric(row, "jepa_mixture_enabled") == 1.0 for row in jepa_rows),
+            "structured_context": any(numeric(row, "jepa_structured_context") == 1.0 for row in jepa_rows),
             "mean_latent_mse": mean_metric(jepa_rows, "jepa_latent_mse"),
             "mean_mixture_nll": mean_metric(jepa_rows, "jepa_mixture_nll"),
             "mean_mixture_entropy": mean_metric(jepa_rows, "jepa_mixture_entropy"),
@@ -221,7 +223,8 @@ def markdown_report(run_dir: Path, rows: List[Dict[str, object]], claims: Dict[s
         lines.append(
             "- Belief-JEPA evaluation includes latent diagnostics "
             f"(EMA enabled: `{bool(jepa.get('ema_enabled'))}`, mean latent MSE: {format_float(jepa.get('mean_latent_mse'))}, "
-            f"mixture enabled: `{bool(jepa.get('mixture_enabled'))}`, mean mixture NLL: {format_float(jepa.get('mean_mixture_nll'))})."
+            f"mixture enabled: `{bool(jepa.get('mixture_enabled'))}`, structured context: `{bool(jepa.get('structured_context'))}`, "
+            f"mean mixture NLL: {format_float(jepa.get('mean_mixture_nll'))})."
         )
     if len(lines) == 5:
         lines.append("- No structured claims were available in this run.")

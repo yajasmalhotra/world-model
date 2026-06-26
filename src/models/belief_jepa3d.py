@@ -26,6 +26,8 @@ class BeliefJEPA3D(nn.Module):
         rnn_dim: int = 128,
         latent_dim: int = 64,
         mixture_components: int = 3,
+        structured_context: bool = False,
+        structured_dim: int = 64,
         world_min: float = -1.0,
         world_max: float = 1.0,
         velocity_limit: float = 0.16,
@@ -37,6 +39,8 @@ class BeliefJEPA3D(nn.Module):
         self.horizon = int(horizon)
         self.latent_dim = int(latent_dim)
         self.mixture_components = max(1, int(mixture_components))
+        self.use_structured_context = bool(structured_context)
+        self.structured_dim = int(structured_dim)
         self.world_min = float(world_min)
         self.world_max = float(world_max)
         self.velocity_limit = float(velocity_limit)
@@ -54,6 +58,24 @@ class BeliefJEPA3D(nn.Module):
         )
         self.temporal = nn.GRU(cnn_dim, rnn_dim, batch_first=True)
         self.context_proj = nn.Sequential(nn.Linear(rnn_dim, rnn_dim), nn.ReLU())
+        if self.use_structured_context:
+            self.structured_state_encoder = nn.Sequential(
+                nn.Linear(13, self.structured_dim),
+                nn.ReLU(),
+                nn.Linear(self.structured_dim, self.structured_dim),
+                nn.ReLU(),
+            )
+            self.structured_state_temporal = nn.GRU(self.structured_dim, self.structured_dim, batch_first=True)
+            self.structured_box_encoder = nn.Sequential(
+                nn.Linear(10, self.structured_dim),
+                nn.ReLU(),
+                nn.Linear(self.structured_dim, self.structured_dim),
+                nn.ReLU(),
+            )
+            self.structured_fusion = nn.Sequential(
+                nn.Linear(rnn_dim + 2 * self.structured_dim, rnn_dim),
+                nn.ReLU(),
+            )
         self.predictor = nn.Sequential(
             nn.Linear(rnn_dim, rnn_dim),
             nn.ReLU(),
@@ -122,12 +144,111 @@ class BeliefJEPA3D(nn.Module):
             return torch.tensor(0.0)
         return torch.sqrt(torch.stack(diffs).mean())
 
-    def _encode_context(self, frames: torch.Tensor) -> torch.Tensor:
+    def _empty_structured_context(self, batch_size: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+        return torch.zeros((batch_size, 2 * self.structured_dim), device=device, dtype=dtype)
+
+    def _encode_structured_objects(
+        self,
+        structured_context: dict[str, torch.Tensor],
+        batch_size: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        obs_state = structured_context.get("obs_state")
+        if obs_state is None:
+            return torch.zeros((batch_size, self.structured_dim), device=device, dtype=dtype)
+        obs_state = obs_state.to(device=device, dtype=dtype)
+        obs_mask = structured_context.get("obs_mask")
+        if obs_mask is None:
+            obs_mask = torch.ones(obs_state.shape[:-1], device=device, dtype=dtype)
+        else:
+            obs_mask = obs_mask.to(device=device, dtype=dtype)
+
+        bsz, steps, objects, _features = obs_state.shape
+        state_features = torch.cat([obs_state, obs_mask.unsqueeze(-1)], dim=-1)
+        encoded = self.structured_state_encoder(state_features.reshape(bsz * steps * objects, -1))
+        encoded = encoded.reshape(bsz, steps, objects, self.structured_dim)
+        sequence = encoded.permute(0, 2, 1, 3).reshape(bsz * objects, steps, self.structured_dim)
+        _output, hidden = self.structured_state_temporal(sequence)
+        object_latent = hidden[-1].reshape(bsz, objects, self.structured_dim)
+        object_active = (obs_mask.sum(dim=1) > 0.0).to(dtype=dtype)
+        pooled = (object_latent * object_active.unsqueeze(-1)).sum(dim=1)
+        return pooled / object_active.sum(dim=1, keepdim=True).clamp_min(1.0)
+
+    def _geometry_group_features(
+        self,
+        boxes: torch.Tensor | None,
+        type_index: int,
+        batch_size: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if boxes is None:
+            return (
+                torch.zeros((batch_size, 0, 10), device=device, dtype=dtype),
+                torch.zeros((batch_size, 0), device=device, dtype=dtype),
+            )
+        boxes = boxes.to(device=device, dtype=dtype)
+        if boxes.dim() == 2:
+            boxes = boxes.unsqueeze(0).expand(batch_size, -1, -1)
+        active = (boxes.abs().sum(dim=-1, keepdim=True) > 1e-6).to(dtype=dtype)
+        type_onehot = torch.zeros((boxes.shape[0], boxes.shape[1], 3), device=device, dtype=dtype)
+        type_onehot[..., int(type_index)] = 1.0
+        return torch.cat([boxes, active, type_onehot], dim=-1), active.squeeze(-1)
+
+    def _encode_structured_geometry(
+        self,
+        structured_context: dict[str, torch.Tensor],
+        batch_size: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        groups = [
+            self._geometry_group_features(structured_context.get("visual_occluders"), 0, batch_size, device, dtype),
+            self._geometry_group_features(structured_context.get("physical_obstacles"), 1, batch_size, device, dtype),
+            self._geometry_group_features(structured_context.get("solid_screens"), 2, batch_size, device, dtype),
+        ]
+        features = torch.cat([item[0] for item in groups], dim=1)
+        active = torch.cat([item[1] for item in groups], dim=1)
+        if features.shape[1] == 0:
+            return torch.zeros((batch_size, self.structured_dim), device=device, dtype=dtype)
+        encoded = self.structured_box_encoder(features.reshape(features.shape[0] * features.shape[1], -1))
+        encoded = encoded.reshape(features.shape[0], features.shape[1], self.structured_dim)
+        pooled = (encoded * active.unsqueeze(-1)).sum(dim=1)
+        return pooled / active.sum(dim=1, keepdim=True).clamp_min(1.0)
+
+    def _encode_structured_context(
+        self,
+        structured_context: dict[str, torch.Tensor] | None,
+        batch_size: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        if structured_context is None:
+            return self._empty_structured_context(batch_size, device, dtype)
+        objects = self._encode_structured_objects(structured_context, batch_size, device, dtype)
+        geometry = self._encode_structured_geometry(structured_context, batch_size, device, dtype)
+        return torch.cat([objects, geometry], dim=-1)
+
+    def _encode_context(
+        self,
+        frames: torch.Tensor,
+        structured_context: dict[str, torch.Tensor] | None = None,
+    ) -> torch.Tensor:
         bsz, steps, channels, height, width = frames.shape
         encoded = self.frame_encoder(frames.reshape(bsz * steps, channels, height, width))
         encoded = encoded.reshape(bsz, steps, -1)
         _, hidden = self.temporal(encoded)
-        return self.context_proj(hidden[-1])
+        visual_context = self.context_proj(hidden[-1])
+        if not self.use_structured_context:
+            return visual_context
+        structured = self._encode_structured_context(
+            structured_context,
+            bsz,
+            visual_context.device,
+            visual_context.dtype,
+        )
+        return self.structured_fusion(torch.cat([visual_context, structured], dim=-1))
 
     def _target_input(self, future_state: torch.Tensor, steps: int) -> torch.Tensor:
         target_dyn = future_state[:, :steps, :, 0:6]
@@ -164,11 +285,12 @@ class BeliefJEPA3D(nn.Module):
         self,
         frames: torch.Tensor,
         future_state: torch.Tensor | None = None,
+        structured_context: dict[str, torch.Tensor] | None = None,
         use_ema_target: bool = True,
         include_target_reconstruction: bool = True,
     ) -> dict[str, torch.Tensor]:
         bsz = frames.shape[0]
-        context = self._encode_context(frames)
+        context = self._encode_context(frames, structured_context=structured_context)
         raw = self.predictor(context).reshape(bsz, self.horizon, self.max_objects, self.latent_dim + 12)
         pred_latent = raw[..., : self.latent_dim]
         raw_mean = raw[..., self.latent_dim : self.latent_dim + 6]

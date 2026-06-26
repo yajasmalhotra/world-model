@@ -120,6 +120,38 @@ class BeliefJEPAEMATest(unittest.TestCase):
         self.assertEqual(particles.shape, (2, 4, 2, 9, 6))
         self.assertEqual(weights.shape, (2, 4, 2, 9))
 
+    def test_structured_context_branch_changes_context_predictions(self) -> None:
+        model = BeliefJEPA3D(
+            max_objects=2,
+            horizon=4,
+            input_channels=3,
+            cnn_dim=8,
+            rnn_dim=16,
+            latent_dim=8,
+            structured_context=True,
+            structured_dim=8,
+        )
+        frames, future_state, _future_mask = self._make_batch()
+        obs_state = torch.zeros(2, 3, 2, 12)
+        obs_mask = torch.ones(2, 3, 2)
+        boxes = torch.zeros(2, 1, 6)
+        structured = {
+            "obs_state": obs_state,
+            "obs_mask": obs_mask,
+            "visual_occluders": boxes,
+            "physical_obstacles": boxes,
+            "solid_screens": boxes,
+        }
+        changed_structured = {key: value.clone() for key, value in structured.items()}
+        changed_structured["obs_state"][..., 0:6] += 0.5
+        changed_structured["physical_obstacles"][:, 0] = torch.tensor([-0.2, -0.2, -0.1, 0.2, 0.2, 0.1])
+
+        base = model(frames, future_state=future_state, structured_context=structured, use_ema_target=True)
+        changed = model(frames, future_state=future_state, structured_context=changed_structured, use_ema_target=True)
+
+        self.assertTrue(model.use_structured_context)
+        self.assertFalse(torch.allclose(base["pred_latent"], changed["pred_latent"]))
+
     def test_legacy_diagnostics_strip_untrained_mixture_outputs(self) -> None:
         outputs = {
             "mean": torch.zeros(1),

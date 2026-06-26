@@ -99,6 +99,9 @@ def load_belief_jepa(config: Dict, device: torch.device, ckpt_path: str) -> tupl
     data_cfg = ckpt_config["data3d"]
     rgbd = bool(ckpt.get("rgbd", False))
     ema_enabled = bool(ckpt.get("ema_enabled", False))
+    model_state = ckpt["model_state"]
+    state_has_structured = any(str(key).startswith("structured_") for key in model_state.keys())
+    structured_enabled = bool(ckpt.get("structured_context", state_has_structured))
     horizon = max(int(data_cfg["seq_len"]), int(data_cfg["obs_len"]) + 14, 24) - int(data_cfg["obs_len"])
     model = BeliefJEPA3D(
         max_objects=int(model_cfg["max_objects"]),
@@ -108,17 +111,22 @@ def load_belief_jepa(config: Dict, device: torch.device, ckpt_path: str) -> tupl
         rnn_dim=int(model_cfg["encoder_rnn_dim"]),
         latent_dim=int(model_cfg.get("jepa_latent_dim", 64)),
         mixture_components=int(ckpt.get("mixture_components", model_cfg.get("jepa_mixture_components", 3))),
+        structured_context=structured_enabled,
+        structured_dim=int(model_cfg.get("jepa_structured_dim", 64)),
         world_min=float(data_cfg["world_min"]),
         world_max=float(data_cfg["world_max"]),
         velocity_limit=float(model_cfg["velocity_limit"]),
         min_log_std=float(model_cfg["min_log_std"]),
         max_log_std=float(model_cfg.get("jepa_max_log_std", -0.8)),
     ).to(device)
-    incompatible = model.load_state_dict(ckpt["model_state"], strict=False)
+    incompatible = model.load_state_dict(model_state, strict=False)
     ema_prefixes = ("ema_target_encoder.", "ema_target_temporal.", "ema_target_temporal_proj.")
     if any(key.startswith(ema_prefixes) for key in incompatible.missing_keys):
         model.sync_ema_target_encoder()
     missing_mixture = any(key.startswith("mixture_head.") for key in incompatible.missing_keys)
+    missing_structured = any(key.startswith("structured_") for key in incompatible.missing_keys)
+    if missing_structured:
+        model.use_structured_context = False
     model.mixture_enabled = bool(int(ckpt.get("mixture_components", 0)) > 1 and not missing_mixture)
     model.belief_head = str(ckpt.get("belief_head", "single_gaussian"))
     return model, rgbd, ema_enabled
@@ -142,6 +150,18 @@ def context_frames(batch: Dict, device: torch.device, rgbd: bool) -> torch.Tenso
     if not rgbd:
         return frames
     return torch.cat([frames, batch["obs_depth"].to(device)], dim=2)
+
+
+def structured_context(batch: Dict, device: torch.device, enabled: bool) -> Dict[str, torch.Tensor] | None:
+    if not enabled:
+        return None
+    return {
+        "obs_state": batch["obs_state"].to(device),
+        "obs_mask": batch["obs_mask"].to(device),
+        "visual_occluders": batch["visual_occluders"].to(device),
+        "physical_obstacles": batch["physical_obstacles"].to(device),
+        "solid_screens": batch["solid_screens"].to(device),
+    }
 
 
 def target_object_mask(batch: Dict, future_mask: torch.Tensor) -> Optional[torch.Tensor]:
@@ -251,6 +271,7 @@ def evaluate_split(
             outputs = jepa(
                 context_frames(batch, device, jepa_rgbd),
                 future_state=future_state,
+                structured_context=structured_context(batch, device, bool(jepa.use_structured_context)),
                 use_ema_target=jepa_ema_enabled,
                 include_target_reconstruction=False,
             )
@@ -507,6 +528,7 @@ def main() -> None:
                 )
                 metrics["jepa_ema_enabled"] = float(jepa_ema_enabled)
                 metrics["jepa_mixture_enabled"] = float(bool(getattr(belief_jepa, "mixture_enabled", False)))
+                metrics["jepa_structured_context"] = float(bool(getattr(belief_jepa, "use_structured_context", False)))
                 row = {"split": split, "mode": "belief_jepa_latent_predictor", **metrics}
                 append_metrics(run_dir, row)
                 summary["splits"][f"jepa::{split}"] = metrics

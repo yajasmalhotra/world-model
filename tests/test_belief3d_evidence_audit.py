@@ -124,6 +124,7 @@ class Belief3DEvidenceAuditTest(unittest.TestCase):
                             "jepa": {
                                 "ema_enabled": True,
                                 "mixture_enabled": True,
+                                "structured_context": True,
                                 "mean_latent_mse": 1.2,
                                 "mean_mixture_nll": 0.8,
                                 "mean_mixture_entropy": 1.0,

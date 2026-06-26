@@ -136,6 +136,9 @@ def load_belief_jepa(config: Dict, device: torch.device, ckpt_path: str) -> tupl
     data_cfg = ckpt_config["data3d"]
     rgbd = bool(ckpt.get("rgbd", False))
     ema_enabled = bool(ckpt.get("ema_enabled", False))
+    model_state = ckpt["model_state"]
+    state_has_structured = any(str(key).startswith("structured_") for key in model_state.keys())
+    structured_enabled = bool(ckpt.get("structured_context", state_has_structured))
     horizon = max(int(data_cfg["seq_len"]), int(data_cfg["obs_len"]) + 14, 24) - int(data_cfg["obs_len"])
     model = BeliefJEPA3D(
         max_objects=int(model_cfg["max_objects"]),
@@ -145,17 +148,22 @@ def load_belief_jepa(config: Dict, device: torch.device, ckpt_path: str) -> tupl
         rnn_dim=int(model_cfg["encoder_rnn_dim"]),
         latent_dim=int(model_cfg.get("jepa_latent_dim", 64)),
         mixture_components=int(ckpt.get("mixture_components", model_cfg.get("jepa_mixture_components", 3))),
+        structured_context=structured_enabled,
+        structured_dim=int(model_cfg.get("jepa_structured_dim", 64)),
         world_min=float(data_cfg["world_min"]),
         world_max=float(data_cfg["world_max"]),
         velocity_limit=float(model_cfg["velocity_limit"]),
         min_log_std=float(model_cfg["min_log_std"]),
         max_log_std=float(model_cfg.get("jepa_max_log_std", -0.8)),
     ).to(device)
-    incompatible = model.load_state_dict(ckpt["model_state"], strict=False)
+    incompatible = model.load_state_dict(model_state, strict=False)
     ema_prefixes = ("ema_target_encoder.", "ema_target_temporal.", "ema_target_temporal_proj.")
     if any(key.startswith(ema_prefixes) for key in incompatible.missing_keys):
         model.sync_ema_target_encoder()
     missing_mixture = any(key.startswith("mixture_head.") for key in incompatible.missing_keys)
+    missing_structured = any(key.startswith("structured_") for key in incompatible.missing_keys)
+    if missing_structured:
+        model.use_structured_context = False
     model.mixture_enabled = bool(int(ckpt.get("mixture_components", 0)) > 1 and not missing_mixture)
     model.belief_head = str(ckpt.get("belief_head", "single_gaussian"))
     model.eval()
@@ -170,6 +178,23 @@ def sample_context_tensor(sample: Dict[str, np.ndarray], obs_len: int, device: t
     depth = torch.from_numpy(sample["depth"][:obs_len].astype(np.float32))
     depth = depth.unsqueeze(1).unsqueeze(0).contiguous().to(device)
     return torch.cat([frames, depth], dim=2)
+
+
+def sample_structured_context(
+    sample: Dict[str, np.ndarray],
+    obs_len: int,
+    device: torch.device,
+    enabled: bool,
+) -> Dict[str, torch.Tensor] | None:
+    if not enabled:
+        return None
+    return {
+        "obs_state": torch.from_numpy(sample["state"][:obs_len].astype(np.float32)).unsqueeze(0).to(device),
+        "obs_mask": torch.from_numpy(sample["object_mask"][:obs_len].astype(np.float32)).unsqueeze(0).to(device),
+        "visual_occluders": torch.from_numpy(sample["visual_occluders"].astype(np.float32)).unsqueeze(0).to(device),
+        "physical_obstacles": torch.from_numpy(sample["physical_obstacles"].astype(np.float32)).unsqueeze(0).to(device),
+        "solid_screens": torch.from_numpy(sample["solid_screens"].astype(np.float32)).unsqueeze(0).to(device),
+    }
 
 
 def project_points(points: np.ndarray, cfg: Scene3DConfig) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -739,6 +764,12 @@ def build_demo_for_seed(
             jepa_outputs = belief_jepa(
                 sample_context_tensor(sample, obs_len, device, rgbd=jepa_rgbd),
                 future_state=future_state_tensor,
+                structured_context=sample_structured_context(
+                    sample,
+                    obs_len,
+                    device,
+                    bool(getattr(belief_jepa, "use_structured_context", False)),
+                ),
                 use_ema_target=jepa_ema_enabled,
                 include_target_reconstruction=False,
             )
@@ -866,6 +897,11 @@ def build_demo_for_seed(
             return bool(getattr(belief_jepa, "mixture_enabled", False))
         return None
 
+    def method_structured_context(method: str) -> Optional[bool]:
+        if method == "jepa" and belief_jepa is not None:
+            return bool(getattr(belief_jepa, "use_structured_context", False))
+        return None
+
     for method in requested_methods:
         trace = traces.get(method)
         if trace is None:
@@ -877,6 +913,7 @@ def build_demo_for_seed(
                 "rgbd": method_rgbd_flag(method),
                 "belief_head": method_belief_head(method),
                 "mixture_enabled": method_mixture_enabled(method),
+                "structured_context": method_structured_context(method),
                 "mean_expected_distance": None,
                 "mean_surprise": None,
                 "mean_entropy": None,
@@ -893,6 +930,7 @@ def build_demo_for_seed(
             "rgbd": method_rgbd_flag(method),
             "belief_head": method_belief_head(method),
             "mixture_enabled": method_mixture_enabled(method),
+            "structured_context": method_structured_context(method),
             "mean_expected_distance": finite_mean(trace_metrics["expected_distance"]),
             "mean_surprise": finite_mean(trace_metrics["surprise"]),
             "mean_entropy": finite_mean(trace_metrics["entropy"]),

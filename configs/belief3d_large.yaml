@@ -60,6 +60,8 @@ model3d:
   min_log_std: -5.0
   max_log_std: -1.0
   jepa_mixture_components: 3
+  jepa_structured_context: true
+  jepa_structured_dim: 64
 
 train_belief3d:
   lr: 0.001

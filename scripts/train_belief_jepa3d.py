@@ -47,6 +47,18 @@ def context_frames(batch: Dict, device: torch.device, rgbd: bool) -> torch.Tenso
     return torch.cat([frames, batch["obs_depth"].to(device)], dim=2)
 
 
+def structured_context(batch: Dict, device: torch.device, enabled: bool) -> Dict[str, torch.Tensor] | None:
+    if not enabled:
+        return None
+    return {
+        "obs_state": batch["obs_state"].to(device),
+        "obs_mask": batch["obs_mask"].to(device),
+        "visual_occluders": batch["visual_occluders"].to(device),
+        "physical_obstacles": batch["physical_obstacles"].to(device),
+        "solid_screens": batch["solid_screens"].to(device),
+    }
+
+
 def build_model(config: Dict, device: torch.device, rgbd: bool) -> BeliefJEPA3D:
     model_cfg = config["model3d"]
     data_cfg = config["data3d"]
@@ -59,6 +71,8 @@ def build_model(config: Dict, device: torch.device, rgbd: bool) -> BeliefJEPA3D:
         rnn_dim=int(model_cfg["encoder_rnn_dim"]),
         latent_dim=int(model_cfg.get("jepa_latent_dim", 64)),
         mixture_components=int(model_cfg.get("jepa_mixture_components", 3)),
+        structured_context=bool(model_cfg.get("jepa_structured_context", True)),
+        structured_dim=int(model_cfg.get("jepa_structured_dim", 64)),
         world_min=float(data_cfg["world_min"]),
         world_max=float(data_cfg["world_max"]),
         velocity_limit=float(model_cfg["velocity_limit"]),
@@ -106,6 +120,11 @@ def average_rows(rows: list[Dict[str, float]], prefix: str = "") -> Dict[str, fl
     return averages
 
 
+def context_encoder_name(rgbd: bool, structured_enabled: bool) -> str:
+    visual = "rgbd" if rgbd else "rgb"
+    return f"{visual}_state_geometry" if structured_enabled else visual
+
+
 @torch.no_grad()
 def evaluate_val(
     model: BeliefJEPA3D,
@@ -119,9 +138,10 @@ def evaluate_val(
     rows: list[Dict[str, float]] = []
     for batch in loader:
         frames = context_frames(batch, device, rgbd)
+        struct = structured_context(batch, device, bool(model.use_structured_context))
         future_state = batch["future_state"].to(device)
         future_mask = batch["future_mask"].to(device)
-        outputs = model(frames, future_state=future_state, use_ema_target=ema_enabled)
+        outputs = model(frames, future_state=future_state, structured_context=struct, use_ema_target=ema_enabled)
         losses = belief_jepa_loss(outputs, future_state, future_mask, **loss_weights(train_cfg))
         rows.append(scalar_losses(losses))
     metrics = average_rows(rows, prefix="val_")
@@ -169,9 +189,10 @@ def main() -> None:
         train_rows: list[Dict[str, float]] = []
         for batch in train_loader:
             frames = context_frames(batch, device, args.rgbd)
+            struct = structured_context(batch, device, bool(model.use_structured_context))
             future_state = batch["future_state"].to(device)
             future_mask = batch["future_mask"].to(device)
-            outputs = model(frames, future_state=future_state, use_ema_target=ema_enabled)
+            outputs = model(frames, future_state=future_state, structured_context=struct, use_ema_target=ema_enabled)
             losses = belief_jepa_loss(outputs, future_state, future_mask, **loss_cfg)
             optimizer.zero_grad()
             losses["total"].backward()
@@ -195,6 +216,7 @@ def main() -> None:
             "sigreg_scale": float(loss_cfg["sigreg_scale"]),
             "mixture_belief_weight": float(loss_cfg["mixture_belief_weight"]),
             "mixture_components": float(model.mixture_components),
+            "structured_context": float(model.use_structured_context),
             "global_step": float(global_step),
             "train_loss": train_metrics.get("total", math.nan),
             **train_metrics,
@@ -222,6 +244,8 @@ def main() -> None:
                     "target_encoder": TARGET_ENCODER_KIND,
                     "mixture_components": int(model.mixture_components),
                     "belief_head": f"gaussian_mixture_{int(model.mixture_components)}",
+                    "structured_context": bool(model.use_structured_context),
+                    "context_encoder": context_encoder_name(bool(args.rgbd), bool(model.use_structured_context)),
                 },
             )
 
@@ -243,6 +267,8 @@ def main() -> None:
             "target_encoder": TARGET_ENCODER_KIND,
             "mixture_components": int(model.mixture_components),
             "belief_head": f"gaussian_mixture_{int(model.mixture_components)}",
+            "structured_context": bool(model.use_structured_context),
+            "context_encoder": context_encoder_name(bool(args.rgbd), bool(model.use_structured_context)),
         },
     )
     print(f"Done. Best checkpoint: {best_ckpt}")

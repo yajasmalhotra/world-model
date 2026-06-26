@@ -340,6 +340,7 @@ def audit_report(report_json_path: Path) -> List[Check]:
     if (
         bool(jepa.get("ema_enabled"))
         and bool(jepa.get("mixture_enabled"))
+        and bool(jepa.get("structured_context"))
         and is_finite_number(jepa.get("mean_latent_mse"))
         and is_finite_number(jepa.get("mean_mixture_nll"))
         and is_finite_number(jepa.get("mean_mixture_entropy"))
@@ -347,7 +348,7 @@ def audit_report(report_json_path: Path) -> List[Check]:
         checks.append(
             pass_check(
                 "report.jepa_diagnostics",
-                f"EMA JEPA latent MSE={float(jepa['mean_latent_mse']):.4f}, "
+                f"EMA structured-context JEPA latent MSE={float(jepa['mean_latent_mse']):.4f}, "
                 f"mixture NLL={float(jepa['mean_mixture_nll']):.4f}.",
             )
         )
@@ -421,6 +422,12 @@ def audit_jepa_ablation(ablation_json_path: Path) -> List[Check]:
         checks.append(pass_check("jepa_ablation.belief_head", f"All variants use {next(iter(belief_heads))}."))
     else:
         checks.append(fail_check("jepa_ablation.belief_head", f"Invalid or mixed belief heads in ablation: {sorted(belief_heads)}."))
+
+    structured_contexts = {bool(row.get("structured_context", False)) for row in rows}
+    if structured_contexts == {True}:
+        checks.append(pass_check("jepa_ablation.structured_context", "All variants use structured state+geometry context."))
+    else:
+        checks.append(fail_check("jepa_ablation.structured_context", f"Invalid structured-context flags: {sorted(structured_contexts)}."))
 
     required_metrics = {
         "target_hidden_expected_distance",

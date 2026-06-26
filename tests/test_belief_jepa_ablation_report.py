@@ -21,6 +21,7 @@ class BeliefJEPA3DAblationReportTest(unittest.TestCase):
                 "sigreg_weight": 0.05,
                 "target_encoder": "bidirectional_temporal_state6_occ",
                 "belief_head": "gaussian_mixture_3",
+                "structured_context": True,
                 "target_hidden_expected_distance": 0.5,
                 "target_reappearance_surprise": 7.0,
                 "target_hidden_nll": 1.1,
@@ -40,6 +41,7 @@ class BeliefJEPA3DAblationReportTest(unittest.TestCase):
                 "sigreg_weight": 0.05,
                 "target_encoder": "bidirectional_temporal_state6_occ",
                 "belief_head": "gaussian_mixture_3",
+                "structured_context": True,
                 "target_hidden_expected_distance": 0.7,
                 "target_reappearance_surprise": 9.0,
                 "target_hidden_nll": 1.5,
@@ -59,6 +61,7 @@ class BeliefJEPA3DAblationReportTest(unittest.TestCase):
                 "sigreg_weight": 0.0,
                 "target_encoder": "bidirectional_temporal_state6_occ",
                 "belief_head": "gaussian_mixture_3",
+                "structured_context": True,
                 "target_hidden_expected_distance": 0.6,
                 "target_reappearance_surprise": 8.0,
                 "target_hidden_nll": 1.3,
@@ -96,6 +99,7 @@ class BeliefJEPA3DAblationReportTest(unittest.TestCase):
         self.assertIn("sigreg_weight", header)
         self.assertIn("jepa_pred_target_cosine", header)
         self.assertIn("jepa_mixture_nll", header)
+        self.assertIn("structured_context", header)
 
     def test_evidence_audit_accepts_ablation_report(self) -> None:
         rows = self._rows()
