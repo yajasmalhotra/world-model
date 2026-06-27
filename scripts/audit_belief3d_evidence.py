@@ -83,6 +83,7 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default="results/belief_jepa3d_ablation/belief_jepa3d_ablation.json",
     )
+    parser.add_argument("--showcase-md", type=str, default="results/belief3d_showcase.md")
     parser.add_argument("--output-dir", type=str, default="results/belief3d_audit")
     parser.add_argument("--sample-count", type=int, default=3, help="Targeted manifest rows to regenerate per split.")
     return parser.parse_args()
@@ -468,6 +469,31 @@ def audit_jepa_ablation(ablation_json_path: Path) -> List[Check]:
     return checks
 
 
+def audit_showcase(showcase_path: Path) -> List[Check]:
+    checks: List[Check] = []
+    if not showcase_path.is_absolute():
+        showcase_path = ROOT / showcase_path
+    if not showcase_path.exists():
+        return [fail_check("showcase.md", f"Missing {showcase_path}")]
+    text = showcase_path.read_text(encoding="utf-8")
+    checks.append(pass_check("showcase.md", f"Loaded {showcase_path}."))
+    required_terms = {
+        "showcase.thesis": "pixel prediction is not object permanence",
+        "showcase.counterfactual": "visual-only delta",
+        "showcase.ema": "EMA target encoder",
+        "showcase.reproduce": "Reproduce The Smoke Evidence",
+        "showcase.limitations": "Honest Limitations",
+        "showcase.demo_gif": "seed_2026_belief3d.gif",
+        "showcase.audit_command": "scripts/audit_belief3d_evidence.py",
+    }
+    for name, term in required_terms.items():
+        if term in text:
+            checks.append(pass_check(name, f"Found `{term}`."))
+        else:
+            checks.append(fail_check(name, f"Missing `{term}` in {showcase_path}."))
+    return checks
+
+
 def summarize_checks(checks: List[Check]) -> Dict[str, Any]:
     counts = {"pass": 0, "warn": 0, "fail": 0}
     for check in checks:
@@ -523,6 +549,7 @@ def main() -> None:
     )
     checks.extend(audit_report(Path(args.report_json)))
     checks.extend(audit_jepa_ablation(Path(args.jepa_ablation_json)))
+    checks.extend(audit_showcase(Path(args.showcase_md)))
     summary = summarize_checks(checks)
     artifacts = write_outputs(summary, Path(args.output_dir))
     print(json.dumps({"status": summary["status"], "counts": summary["counts"], "artifacts": artifacts}, indent=2))
