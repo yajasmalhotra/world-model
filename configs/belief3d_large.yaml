@@ -63,8 +63,11 @@ model3d:
   jepa_structured_context: true
   jepa_structured_dim: 64
   jepa_visual_geometry_weight: 0.0
+  jepa_geometry_prior_weight: 0.5
 
 train_belief3d:
+  extra_train_splits:
+    - train_structured_occlusion
   lr: 0.001
   weight_decay: 0.0
   epochs: 4
@@ -77,6 +80,7 @@ train_belief3d:
   mixture_belief_weight: 0.25
   target_recon_weight: 0.1
   visual_invariance_weight: 0.1
+  geometry_teacher_weight: 1.0
   sigreg_weight: 0.05
   sigreg_sketches: 16
   sigreg_scale: 1.0

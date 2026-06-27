@@ -8,6 +8,22 @@
     "overrides": {},
     "target_metadata": false
   },
+  "train_structured_occlusion": {
+    "path": "data/manifests3d/train_structured_occlusion.jsonl",
+    "count": 32,
+    "tags": [
+      "train",
+      "targeted_occlusion",
+      "structured_occlusion"
+    ],
+    "overrides": {
+      "scenario": "structured_occlusion",
+      "path_mode": "linear",
+      "seq_len": 24,
+      "obs_len": 6
+    },
+    "target_metadata": true
+  },
   "val": {
     "path": "data/manifests3d/val.jsonl",
     "count": 8,

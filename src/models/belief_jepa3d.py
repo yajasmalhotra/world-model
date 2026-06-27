@@ -6,6 +6,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from src.models.belief_state import ParticleBeliefConfig, rollout_geometry_aware_particle_belief
+
 
 class BeliefJEPA3D(nn.Module):
     """
@@ -29,6 +31,7 @@ class BeliefJEPA3D(nn.Module):
         structured_context: bool = False,
         structured_dim: int = 64,
         visual_geometry_weight: float = 1.0,
+        geometry_prior_weight: float = 0.0,
         world_min: float = -1.0,
         world_max: float = 1.0,
         velocity_limit: float = 0.16,
@@ -43,6 +46,7 @@ class BeliefJEPA3D(nn.Module):
         self.use_structured_context = bool(structured_context)
         self.structured_dim = int(structured_dim)
         self.visual_geometry_weight = float(visual_geometry_weight)
+        self.geometry_prior_weight = float(geometry_prior_weight)
         self.world_min = float(world_min)
         self.world_max = float(world_max)
         self.velocity_limit = float(velocity_limit)
@@ -267,6 +271,83 @@ class BeliefJEPA3D(nn.Module):
         vel = self.velocity_limit * torch.tanh(raw_mean[..., 3:6])
         return torch.cat([pos, vel], dim=-1)
 
+    def _physical_obstacle_boxes(
+        self,
+        structured_context: dict[str, torch.Tensor],
+        batch_size: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        groups = []
+        for key in ("physical_obstacles", "solid_screens"):
+            boxes = structured_context.get(key)
+            if boxes is None:
+                continue
+            boxes = boxes.to(device=device, dtype=dtype)
+            if boxes.dim() == 2:
+                boxes = boxes.unsqueeze(0).expand(batch_size, -1, -1)
+            groups.append(boxes)
+        if groups:
+            return torch.cat(groups, dim=1)
+        return torch.zeros((batch_size, 0, 6), device=device, dtype=dtype)
+
+    @torch.no_grad()
+    def _geometry_prior_state6(
+        self,
+        structured_context: dict[str, torch.Tensor] | None,
+        batch_size: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> torch.Tensor | None:
+        if not self.use_structured_context or structured_context is None or self.geometry_prior_weight <= 0.0:
+            return None
+        obs_state = structured_context.get("obs_state")
+        if obs_state is None:
+            return None
+        obs_state = obs_state.to(device=device, dtype=dtype)
+        obs_mask = structured_context.get("obs_mask")
+        if obs_mask is None:
+            obs_mask = torch.ones(obs_state.shape[:-1], device=device, dtype=dtype)
+        else:
+            obs_mask = obs_mask.to(device=device, dtype=dtype)
+        cfg = ParticleBeliefConfig(
+            num_particles=1,
+            init_pos_noise=0.0,
+            init_vel_noise=0.0,
+            process_pos_noise=0.0,
+            process_vel_noise=0.0,
+            world_min=self.world_min,
+            world_max=self.world_max,
+        )
+        obstacles = self._physical_obstacle_boxes(structured_context, batch_size, device, dtype)
+        particles, _weights = rollout_geometry_aware_particle_belief(
+            obs_state[:, -1],
+            obs_mask[:, -1],
+            obstacles,
+            horizon=self.horizon,
+            cfg=cfg,
+        )
+        return particles[..., 0, :]
+
+    def _blend_geometry_prior(
+        self,
+        mean: torch.Tensor,
+        mixture_mean: torch.Tensor,
+        structured_context: dict[str, torch.Tensor] | None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+        prior = self._geometry_prior_state6(
+            structured_context,
+            batch_size=mean.shape[0],
+            device=mean.device,
+            dtype=mean.dtype,
+        )
+        if prior is None:
+            return mean, mixture_mean, None
+        weight = max(0.0, min(1.0, self.geometry_prior_weight))
+        blended_mean = (1.0 - weight) * mean + weight * prior
+        blended_mixture = (1.0 - weight) * mixture_mean + weight * prior.unsqueeze(-2)
+        return blended_mean, blended_mixture, prior
+
     def _encode_target(self, target_input: torch.Tensor, use_ema_target: bool) -> torch.Tensor:
         encoder, temporal, temporal_proj = self._ema_target_modules() if use_ema_target else self._online_target_modules()
         bsz, steps, objects, _features = target_input.shape
@@ -314,6 +395,7 @@ class BeliefJEPA3D(nn.Module):
         mixture_logits = mixture_raw[..., 0]
         mixture_mean = self._bound_state6(mixture_raw[..., 1:7])
         mixture_log_std = mixture_raw[..., 7:13].clamp(self.min_log_std, self.max_log_std)
+        mean, mixture_mean, geometry_prior = self._blend_geometry_prior(mean, mixture_mean, structured_context)
 
         out = {
             "mean": mean,
@@ -323,6 +405,8 @@ class BeliefJEPA3D(nn.Module):
             "mixture_mean": mixture_mean,
             "mixture_log_std": mixture_log_std,
         }
+        if geometry_prior is not None:
+            out["geometry_prior_mean"] = geometry_prior
         if future_state is not None:
             steps = min(self.horizon, future_state.shape[1])
             target_input = self._target_input(future_state, steps)

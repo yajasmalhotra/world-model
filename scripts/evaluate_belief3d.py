@@ -114,6 +114,7 @@ def load_belief_jepa(config: Dict, device: torch.device, ckpt_path: str) -> tupl
         structured_context=structured_enabled,
         structured_dim=int(model_cfg.get("jepa_structured_dim", 64)),
         visual_geometry_weight=float(ckpt.get("visual_geometry_weight", model_cfg.get("jepa_visual_geometry_weight", 1.0))),
+        geometry_prior_weight=float(ckpt.get("geometry_prior_weight", model_cfg.get("jepa_geometry_prior_weight", 0.0))),
         world_min=float(data_cfg["world_min"]),
         world_max=float(data_cfg["world_max"]),
         velocity_limit=float(model_cfg["velocity_limit"]),
@@ -712,6 +713,7 @@ def main() -> None:
                 metrics["jepa_ema_enabled"] = float(jepa_ema_enabled)
                 metrics["jepa_mixture_enabled"] = float(bool(getattr(belief_jepa, "mixture_enabled", False)))
                 metrics["jepa_structured_context"] = float(bool(getattr(belief_jepa, "use_structured_context", False)))
+                metrics["jepa_geometry_prior_weight"] = float(getattr(belief_jepa, "geometry_prior_weight", 0.0))
                 row = {"split": split, "mode": "belief_jepa_latent_predictor", **metrics}
                 append_metrics(run_dir, row)
                 summary["splits"][f"jepa::{split}"] = metrics

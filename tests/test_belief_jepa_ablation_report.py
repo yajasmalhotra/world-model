@@ -20,6 +20,8 @@ class BeliefJEPA3DAblationReportTest(unittest.TestCase):
                 "rgbd": False,
                 "sigreg_weight": 0.05,
                 "visual_invariance_weight": 0.1,
+                "geometry_teacher_weight": 0.2,
+                "geometry_prior_weight": 0.5,
                 "visual_geometry_weight": 0.0,
                 "target_encoder": "bidirectional_temporal_state6_occ",
                 "belief_head": "gaussian_mixture_3",
@@ -43,6 +45,8 @@ class BeliefJEPA3DAblationReportTest(unittest.TestCase):
                 "rgbd": False,
                 "sigreg_weight": 0.05,
                 "visual_invariance_weight": 0.1,
+                "geometry_teacher_weight": 0.2,
+                "geometry_prior_weight": 0.5,
                 "visual_geometry_weight": 0.0,
                 "target_encoder": "bidirectional_temporal_state6_occ",
                 "belief_head": "gaussian_mixture_3",
@@ -66,6 +70,8 @@ class BeliefJEPA3DAblationReportTest(unittest.TestCase):
                 "rgbd": False,
                 "sigreg_weight": 0.0,
                 "visual_invariance_weight": 0.1,
+                "geometry_teacher_weight": 0.2,
+                "geometry_prior_weight": 0.5,
                 "visual_geometry_weight": 0.0,
                 "target_encoder": "bidirectional_temporal_state6_occ",
                 "belief_head": "gaussian_mixture_3",
@@ -107,6 +113,8 @@ class BeliefJEPA3DAblationReportTest(unittest.TestCase):
         self.assertIn("no_sigreg", report)
         self.assertIn("JEPA cf selectivity", report)
         self.assertIn("visual inv", report)
+        self.assertIn("geom teacher", report)
+        self.assertIn("geom prior", report)
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "ablation.csv"
             write_csv(path, rows)

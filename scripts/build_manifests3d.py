@@ -111,6 +111,18 @@ def main() -> None:
 
     specs = [
         ManifestSpec("train", 10_000_000, train_count, tags=["train"], overrides={}),
+        ManifestSpec(
+            "train_structured_occlusion",
+            19_000_000,
+            train_count,
+            tags=["train", "targeted_occlusion", "structured_occlusion"],
+            overrides={
+                "scenario": "structured_occlusion",
+                "path_mode": "linear",
+                "seq_len": targeted_seq_len,
+                "obs_len": obs_len,
+            },
+        ),
         ManifestSpec("val", 11_000_000, val_count, tags=["val"], overrides={}),
         ManifestSpec("test", 12_000_000, test_count, tags=["test"], overrides={}),
         ManifestSpec(

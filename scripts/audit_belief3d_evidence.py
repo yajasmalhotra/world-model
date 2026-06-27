@@ -21,6 +21,7 @@ from src.train.utils import load_config
 
 REQUIRED_SPLITS = {
     "train",
+    "train_structured_occlusion",
     "val",
     "test",
     "test_long_occlusion",
@@ -156,6 +157,7 @@ def audit_manifests(config: Dict[str, Any], sample_count: int) -> List[Check]:
 
     generator = SyntheticScene3DGenerator(scene3d_config_from_data_cfg(config["data3d"]))
     targeted_expectations = {
+        "train_structured_occlusion": ("structured_occlusion", False),
         "test_targeted_occlusion": ("targeted_occlusion", False),
         "test_structured_occlusion": ("structured_occlusion", False),
         "test_impossible_reappearance": ("impossible_reappearance", True),

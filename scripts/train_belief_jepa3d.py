@@ -17,8 +17,9 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.data3d.dataset3d import SyntheticScene3DDataset, collate_scenes3d
-from src.eval.counterfactual import move_boxes_to_far_corner
+from src.eval.counterfactual import move_boxes_to_far_corner, weighted_position_mean
 from src.models.belief_jepa3d import BeliefJEPA3D, belief_jepa_loss
+from src.models.belief_state import ParticleBeliefConfig, rollout_geometry_aware_particle_belief
 from src.train.utils import append_metrics, get_device, init_run_dir, load_config, save_checkpoint, save_summary, set_seed
 
 
@@ -39,6 +40,22 @@ def parse_args() -> argparse.Namespace:
 def make_loader(manifest_path: Path, data_cfg: Dict, batch_size: int, shuffle: bool) -> DataLoader:
     dataset = SyntheticScene3DDataset(manifest_path, data_cfg)
     return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, num_workers=0, collate_fn=collate_scenes3d)
+
+
+def make_train_loaders(
+    manifest_dir: Path,
+    split_names: list[str],
+    data_cfg: Dict,
+    batch_size: int,
+    shuffle: bool,
+) -> list[DataLoader]:
+    loaders = []
+    for split in split_names:
+        path = manifest_dir / f"{split}.jsonl"
+        if not path.exists():
+            raise FileNotFoundError(f"Missing configured train split: {path}")
+        loaders.append(make_loader(path, data_cfg, batch_size=batch_size, shuffle=shuffle))
+    return loaders
 
 
 def context_frames(batch: Dict, device: torch.device, rgbd: bool) -> torch.Tensor:
@@ -76,6 +93,22 @@ def visual_counterfactual_structured_context(
     return changed
 
 
+def physical_counterfactual_structured_context(
+    base: Dict[str, torch.Tensor] | None,
+    world_min: float,
+    world_max: float,
+) -> Dict[str, torch.Tensor] | None:
+    if base is None:
+        return None
+    changed = {key: value.clone() for key, value in base.items()}
+    changed["physical_obstacles"] = move_boxes_to_far_corner(
+        changed["physical_obstacles"],
+        world_min=world_min,
+        world_max=world_max,
+    )
+    return changed
+
+
 def build_model(config: Dict, device: torch.device, rgbd: bool) -> BeliefJEPA3D:
     model_cfg = config["model3d"]
     data_cfg = config["data3d"]
@@ -91,6 +124,7 @@ def build_model(config: Dict, device: torch.device, rgbd: bool) -> BeliefJEPA3D:
         structured_context=bool(model_cfg.get("jepa_structured_context", True)),
         structured_dim=int(model_cfg.get("jepa_structured_dim", 64)),
         visual_geometry_weight=float(model_cfg.get("jepa_visual_geometry_weight", 1.0)),
+        geometry_prior_weight=float(model_cfg.get("jepa_geometry_prior_weight", 0.0)),
         world_min=float(data_cfg["world_min"]),
         world_max=float(data_cfg["world_max"]),
         velocity_limit=float(model_cfg["velocity_limit"]),
@@ -139,6 +173,74 @@ def visual_invariance_loss(
         "visual_invariance": total,
         "visual_invariance_latent": latent_mse,
         "visual_invariance_mean": mean_mse,
+    }
+
+
+def jepa_position_mean(outputs: Dict[str, torch.Tensor]) -> torch.Tensor:
+    if "mixture_logits" in outputs and "mixture_mean" in outputs:
+        probs = torch.softmax(outputs["mixture_logits"], dim=-1)
+        return torch.sum(probs.unsqueeze(-1) * outputs["mixture_mean"][..., 0:3], dim=-2)
+    return outputs["mean"][..., 0:3]
+
+
+@torch.no_grad()
+def deterministic_geometry_teacher_mean(
+    init_state: torch.Tensor,
+    object_mask: torch.Tensor,
+    obstacles: torch.Tensor,
+    horizon: int,
+    data_cfg: Dict,
+) -> torch.Tensor:
+    cfg = ParticleBeliefConfig(
+        num_particles=1,
+        init_pos_noise=0.0,
+        init_vel_noise=0.0,
+        process_pos_noise=0.0,
+        process_vel_noise=0.0,
+        world_min=float(data_cfg.get("world_min", -1.0)),
+        world_max=float(data_cfg.get("world_max", 1.0)),
+    )
+    particles, weights = rollout_geometry_aware_particle_belief(
+        init_state,
+        object_mask,
+        obstacles,
+        horizon=horizon,
+        cfg=cfg,
+    )
+    return weighted_position_mean(particles, weights)
+
+
+def geometry_counterfactual_teacher_loss(
+    base_outputs: Dict[str, torch.Tensor],
+    physical_outputs: Dict[str, torch.Tensor],
+    batch: Dict,
+    future_state: torch.Tensor,
+    future_mask: torch.Tensor,
+    data_cfg: Dict,
+) -> Dict[str, torch.Tensor]:
+    steps = min(base_outputs["mean"].shape[1], physical_outputs["mean"].shape[1], future_mask.shape[1])
+    obs_state = batch["obs_state"].to(future_state.device)
+    obs_mask = batch["obs_mask"].to(future_state.device)
+    obstacles = batch["obstacles"].to(future_state.device)
+    init_state = obs_state[:, -1]
+    object_mask = obs_mask[:, -1]
+    moved_obstacles = move_boxes_to_far_corner(
+        obstacles,
+        world_min=float(data_cfg.get("world_min", -1.0)),
+        world_max=float(data_cfg.get("world_max", 1.0)),
+    )
+    teacher_base = deterministic_geometry_teacher_mean(init_state, object_mask, obstacles, steps, data_cfg)
+    teacher_physical = deterministic_geometry_teacher_mean(init_state, object_mask, moved_obstacles, steps, data_cfg)
+    teacher_delta = teacher_physical - teacher_base
+    pred_delta = jepa_position_mean(physical_outputs)[:, :steps] - jepa_position_mean(base_outputs)[:, :steps]
+    hidden_mask = future_mask[:, :steps] * (future_state[:, :steps, :, 7] > 0.5).to(dtype=future_mask.dtype)
+    loss = (((pred_delta - teacher_delta) ** 2).sum(dim=-1) * hidden_mask).sum() / hidden_mask.sum().clamp_min(1.0)
+    teacher_delta_norm = (torch.linalg.norm(teacher_delta, dim=-1) * hidden_mask).sum() / hidden_mask.sum().clamp_min(1.0)
+    pred_delta_norm = (torch.linalg.norm(pred_delta, dim=-1) * hidden_mask).sum() / hidden_mask.sum().clamp_min(1.0)
+    return {
+        "geometry_teacher": loss,
+        "geometry_teacher_delta": teacher_delta_norm,
+        "geometry_pred_delta": pred_delta_norm,
     }
 
 
@@ -212,7 +314,8 @@ def main() -> None:
     manifest_dir = Path(data_cfg["manifest_dir"])
     batch_size = int(data_cfg.get("batch_size", config["eval"].get("batch_size", 8)))
 
-    train_loader = make_loader(manifest_dir / "train.jsonl", data_cfg, batch_size=batch_size, shuffle=True)
+    train_splits = ["train"] + [str(split) for split in train_cfg.get("extra_train_splits", [])]
+    train_loaders = make_train_loaders(manifest_dir, train_splits, data_cfg, batch_size=batch_size, shuffle=True)
     val_loader = make_loader(manifest_dir / "val.jsonl", data_cfg, batch_size=batch_size, shuffle=False)
     model = build_model(config, device, rgbd=args.rgbd)
     model.sync_ema_target_encoder()
@@ -236,39 +339,63 @@ def main() -> None:
     for epoch in range(1, epochs + 1):
         model.train()
         train_rows: list[Dict[str, float]] = []
-        for batch in train_loader:
-            frames = context_frames(batch, device, args.rgbd)
-            struct = structured_context(batch, device, bool(model.use_structured_context))
-            future_state = batch["future_state"].to(device)
-            future_mask = batch["future_mask"].to(device)
-            outputs = model(frames, future_state=future_state, structured_context=struct, use_ema_target=ema_enabled)
-            losses = belief_jepa_loss(outputs, future_state, future_mask, **loss_cfg)
-            visual_invariance_weight = float(train_cfg.get("visual_invariance_weight", 0.0))
-            if visual_invariance_weight > 0.0 and bool(model.use_structured_context):
-                visual_struct = visual_counterfactual_structured_context(
-                    struct,
-                    world_min=float(data_cfg.get("world_min", -1.0)),
-                    world_max=float(data_cfg.get("world_max", 1.0)),
-                )
-                visual_outputs = model(
-                    frames,
-                    structured_context=visual_struct,
-                    use_ema_target=ema_enabled,
-                    include_target_reconstruction=False,
-                )
-                invariance_losses = visual_invariance_loss(outputs, visual_outputs, future_mask)
-                losses.update(invariance_losses)
-                losses["total"] = losses["total"] + visual_invariance_weight * invariance_losses["visual_invariance"]
-            optimizer.zero_grad()
-            losses["total"].backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-            optimizer.step()
-            global_step += 1
-            if ema_enabled and global_step > ema_update_after_step:
-                model.update_ema_target_encoder(ema_decay)
-            batch_metrics = scalar_losses(losses)
-            batch_metrics["ema_online_drift"] = float(model.ema_online_drift().detach().cpu().item())
-            train_rows.append(batch_metrics)
+        for train_loader in train_loaders:
+            for batch in train_loader:
+                frames = context_frames(batch, device, args.rgbd)
+                struct = structured_context(batch, device, bool(model.use_structured_context))
+                future_state = batch["future_state"].to(device)
+                future_mask = batch["future_mask"].to(device)
+                outputs = model(frames, future_state=future_state, structured_context=struct, use_ema_target=ema_enabled)
+                losses = belief_jepa_loss(outputs, future_state, future_mask, **loss_cfg)
+                visual_invariance_weight = float(train_cfg.get("visual_invariance_weight", 0.0))
+                geometry_teacher_weight = float(train_cfg.get("geometry_teacher_weight", 0.0))
+                if visual_invariance_weight > 0.0 and bool(model.use_structured_context):
+                    visual_struct = visual_counterfactual_structured_context(
+                        struct,
+                        world_min=float(data_cfg.get("world_min", -1.0)),
+                        world_max=float(data_cfg.get("world_max", 1.0)),
+                    )
+                    visual_outputs = model(
+                        frames,
+                        structured_context=visual_struct,
+                        use_ema_target=ema_enabled,
+                        include_target_reconstruction=False,
+                    )
+                    invariance_losses = visual_invariance_loss(outputs, visual_outputs, future_mask)
+                    losses.update(invariance_losses)
+                    losses["total"] = losses["total"] + visual_invariance_weight * invariance_losses["visual_invariance"]
+                if geometry_teacher_weight > 0.0 and bool(model.use_structured_context):
+                    physical_struct = physical_counterfactual_structured_context(
+                        struct,
+                        world_min=float(data_cfg.get("world_min", -1.0)),
+                        world_max=float(data_cfg.get("world_max", 1.0)),
+                    )
+                    physical_outputs = model(
+                        frames,
+                        structured_context=physical_struct,
+                        use_ema_target=ema_enabled,
+                        include_target_reconstruction=False,
+                    )
+                    teacher_losses = geometry_counterfactual_teacher_loss(
+                        outputs,
+                        physical_outputs,
+                        batch,
+                        future_state,
+                        future_mask,
+                        data_cfg,
+                    )
+                    losses.update(teacher_losses)
+                    losses["total"] = losses["total"] + geometry_teacher_weight * teacher_losses["geometry_teacher"]
+                optimizer.zero_grad()
+                losses["total"].backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+                optimizer.step()
+                global_step += 1
+                if ema_enabled and global_step > ema_update_after_step:
+                    model.update_ema_target_encoder(ema_decay)
+                batch_metrics = scalar_losses(losses)
+                batch_metrics["ema_online_drift"] = float(model.ema_online_drift().detach().cpu().item())
+                train_rows.append(batch_metrics)
 
         val_metrics = evaluate_val(model, val_loader, device, args.rgbd, ema_enabled, train_cfg)
         train_metrics = average_rows(train_rows)
@@ -281,8 +408,11 @@ def main() -> None:
             "sigreg_scale": float(loss_cfg["sigreg_scale"]),
             "mixture_belief_weight": float(loss_cfg["mixture_belief_weight"]),
             "visual_invariance_weight": float(train_cfg.get("visual_invariance_weight", 0.0)),
+            "geometry_teacher_weight": float(train_cfg.get("geometry_teacher_weight", 0.0)),
+            "train_splits": ",".join(train_splits),
             "mixture_components": float(model.mixture_components),
             "structured_context": float(model.use_structured_context),
+            "geometry_prior_weight": float(model.geometry_prior_weight),
             "global_step": float(global_step),
             "train_loss": train_metrics.get("total", math.nan),
             **train_metrics,
@@ -308,11 +438,14 @@ def main() -> None:
                     "sigreg_scale": float(loss_cfg["sigreg_scale"]),
                     "mixture_belief_weight": float(loss_cfg["mixture_belief_weight"]),
                     "visual_invariance_weight": float(train_cfg.get("visual_invariance_weight", 0.0)),
+                    "geometry_teacher_weight": float(train_cfg.get("geometry_teacher_weight", 0.0)),
+                    "train_splits": train_splits,
                     "target_encoder": TARGET_ENCODER_KIND,
                     "mixture_components": int(model.mixture_components),
                     "belief_head": f"gaussian_mixture_{int(model.mixture_components)}",
                     "structured_context": bool(model.use_structured_context),
                     "visual_geometry_weight": float(model.visual_geometry_weight),
+                    "geometry_prior_weight": float(model.geometry_prior_weight),
                     "context_encoder": context_encoder_name(bool(args.rgbd), bool(model.use_structured_context)),
                 },
             )
@@ -333,11 +466,14 @@ def main() -> None:
             "sigreg_scale": float(loss_cfg["sigreg_scale"]),
             "mixture_belief_weight": float(loss_cfg["mixture_belief_weight"]),
             "visual_invariance_weight": float(train_cfg.get("visual_invariance_weight", 0.0)),
+            "geometry_teacher_weight": float(train_cfg.get("geometry_teacher_weight", 0.0)),
+            "train_splits": train_splits,
             "target_encoder": TARGET_ENCODER_KIND,
             "mixture_components": int(model.mixture_components),
             "belief_head": f"gaussian_mixture_{int(model.mixture_components)}",
             "structured_context": bool(model.use_structured_context),
             "visual_geometry_weight": float(model.visual_geometry_weight),
+            "geometry_prior_weight": float(model.geometry_prior_weight),
             "context_encoder": context_encoder_name(bool(args.rgbd), bool(model.use_structured_context)),
         },
     )

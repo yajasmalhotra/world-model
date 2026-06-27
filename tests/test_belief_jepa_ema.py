@@ -12,6 +12,7 @@ from src.models.belief_jepa3d import (
 )
 from src.models.belief_state import ParticleBeliefConfig, particles_from_gaussian_mixture_sequence
 from scripts.evaluate_belief3d import jepa_diagnostic_outputs
+from scripts.train_belief_jepa3d import geometry_counterfactual_teacher_loss
 
 
 class BeliefJEPAEMATest(unittest.TestCase):
@@ -186,6 +187,86 @@ class BeliefJEPAEMATest(unittest.TestCase):
 
         self.assertTrue(torch.allclose(base["pred_latent"], visual["pred_latent"]))
         self.assertFalse(torch.allclose(base["pred_latent"], physical["pred_latent"]))
+
+    def test_geometry_prior_changes_belief_for_physical_obstacles_only(self) -> None:
+        model = BeliefJEPA3D(
+            max_objects=1,
+            horizon=4,
+            input_channels=3,
+            cnn_dim=8,
+            rnn_dim=16,
+            latent_dim=8,
+            structured_context=True,
+            structured_dim=8,
+            visual_geometry_weight=0.0,
+            geometry_prior_weight=1.0,
+            world_min=-1.0,
+            world_max=1.0,
+        )
+        frames = torch.zeros(1, 3, 3, 32, 32)
+        future_state = torch.zeros(1, 4, 1, 12)
+        obs_state = torch.zeros(1, 3, 1, 12)
+        obs_state[:, -1, :, 0] = -0.1
+        obs_state[:, -1, :, 3] = 0.08
+        obs_state[:, -1, :, 8] = 0.02
+        boxes = torch.zeros(1, 1, 6)
+        structured = {
+            "obs_state": obs_state,
+            "obs_mask": torch.ones(1, 3, 1),
+            "visual_occluders": boxes.clone(),
+            "physical_obstacles": torch.tensor([[[0.02, -0.18, -0.18, 0.10, 0.18, 0.18]]], dtype=torch.float32),
+            "solid_screens": boxes.clone(),
+        }
+        visual_changed = {key: value.clone() for key, value in structured.items()}
+        visual_changed["visual_occluders"][:, 0] = torch.tensor([-0.8, -0.8, -0.8, -0.4, -0.4, -0.4])
+        physical_changed = {key: value.clone() for key, value in structured.items()}
+        physical_changed["physical_obstacles"][:, 0] = torch.tensor([0.8, 0.8, 0.8, 0.9, 0.9, 0.9])
+
+        base = model(frames, future_state=future_state, structured_context=structured, use_ema_target=True)
+        visual = model(frames, future_state=future_state, structured_context=visual_changed, use_ema_target=True)
+        physical = model(frames, future_state=future_state, structured_context=physical_changed, use_ema_target=True)
+
+        self.assertIn("geometry_prior_mean", base)
+        self.assertTrue(torch.allclose(base["mean"], visual["mean"]))
+        self.assertTrue(torch.allclose(base["mixture_mean"], visual["mixture_mean"]))
+        self.assertFalse(torch.allclose(base["mean"], physical["mean"]))
+        self.assertFalse(torch.allclose(base["mixture_mean"], physical["mixture_mean"]))
+
+    def test_geometry_counterfactual_teacher_loss_is_finite(self) -> None:
+        base_outputs = {
+            "mean": torch.zeros(1, 4, 1, 6),
+            "mixture_logits": torch.zeros(1, 4, 1, 1),
+            "mixture_mean": torch.zeros(1, 4, 1, 1, 6),
+        }
+        physical_outputs = {
+            "mean": torch.zeros(1, 4, 1, 6),
+            "mixture_logits": torch.zeros(1, 4, 1, 1),
+            "mixture_mean": torch.zeros(1, 4, 1, 1, 6),
+        }
+        obs_state = torch.zeros(1, 2, 1, 12)
+        obs_state[:, -1, :, 0] = -0.1
+        obs_state[:, -1, :, 3] = 0.08
+        obs_state[:, -1, :, 8] = 0.02
+        batch = {
+            "obs_state": obs_state,
+            "obs_mask": torch.ones(1, 2, 1),
+            "obstacles": torch.tensor([[[0.02, -0.18, -0.18, 0.10, 0.18, 0.18]]], dtype=torch.float32),
+        }
+        future_state = torch.zeros(1, 4, 1, 12)
+        future_state[..., 7] = 1.0
+        future_mask = torch.ones(1, 4, 1)
+
+        losses = geometry_counterfactual_teacher_loss(
+            base_outputs,
+            physical_outputs,
+            batch,
+            future_state,
+            future_mask,
+            {"world_min": -1.0, "world_max": 1.0},
+        )
+
+        self.assertTrue(torch.isfinite(losses["geometry_teacher"]))
+        self.assertGreater(float(losses["geometry_teacher_delta"]), 0.0)
 
     def test_legacy_diagnostics_strip_untrained_mixture_outputs(self) -> None:
         outputs = {

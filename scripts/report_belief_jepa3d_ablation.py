@@ -109,6 +109,8 @@ def checkpoint_metadata(name: str, path: Path, device: torch.device) -> Dict[str
     sigreg_sketches = ckpt.get("sigreg_sketches", train_cfg.get("sigreg_sketches"))
     sigreg_scale = ckpt.get("sigreg_scale", train_cfg.get("sigreg_scale"))
     visual_invariance_weight = ckpt.get("visual_invariance_weight", train_cfg.get("visual_invariance_weight"))
+    geometry_teacher_weight = ckpt.get("geometry_teacher_weight", train_cfg.get("geometry_teacher_weight"))
+    geometry_prior_weight = ckpt.get("geometry_prior_weight", config.get("model3d", {}).get("jepa_geometry_prior_weight"))
     return {
         "variant": name,
         "checkpoint": str(path),
@@ -119,6 +121,8 @@ def checkpoint_metadata(name: str, path: Path, device: torch.device) -> Dict[str
         "sigreg_sketches": numeric(sigreg_sketches),
         "sigreg_scale": numeric(sigreg_scale),
         "visual_invariance_weight": numeric(visual_invariance_weight),
+        "geometry_teacher_weight": numeric(geometry_teacher_weight),
+        "geometry_prior_weight": numeric(geometry_prior_weight),
         "target_encoder": ckpt.get("target_encoder", "legacy_per_state"),
         "belief_head": ckpt.get("belief_head", "single_gaussian"),
         "mixture_components": numeric(ckpt.get("mixture_components")),
@@ -229,8 +233,8 @@ def markdown_report(rows: List[Dict[str, object]], claims: Dict[str, object]) ->
         "",
         "## Variants",
         "",
-        "| variant | EMA | SIGReg | visual inv | visual geom | target encoder | belief head | structured | RGB-D | checkpoint |",
-        "| --- | ---: | ---: | ---: | ---: | --- | --- | ---: | ---: | --- |",
+        "| variant | EMA | SIGReg | visual inv | geom teacher | geom prior | visual geom | target encoder | belief head | structured | RGB-D | checkpoint |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- | ---: | ---: | --- |",
     ]
     seen = set()
     for row in rows:
@@ -246,6 +250,8 @@ def markdown_report(rows: List[Dict[str, object]], claims: Dict[str, object]) ->
                     str(bool(row.get("ema_enabled"))),
                     format_float(row.get("sigreg_weight")),
                     format_float(row.get("visual_invariance_weight")),
+                    format_float(row.get("geometry_teacher_weight")),
+                    format_float(row.get("geometry_prior_weight")),
                     format_float(row.get("visual_geometry_weight")),
                     str(row.get("target_encoder", "")),
                     str(row.get("belief_head", "")),
