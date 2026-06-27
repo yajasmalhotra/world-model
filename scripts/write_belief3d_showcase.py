@@ -168,6 +168,7 @@ def build_showcase(
             "conda run -n term-project-wm python scripts/train_belief_jepa3d.py --config configs/belief3d_smoke.yaml",
             "conda run -n term-project-wm python scripts/evaluate_belief3d.py --config configs/belief3d_smoke.yaml --mode all --jepa-ckpt runs/20260626_175651_train_belief_jepa3d/checkpoints/best.pt",
             "conda run -n term-project-wm python scripts/report_belief3d.py --run-dir runs/20260626_175709_evaluate_belief3d --output-dir results/belief3d_report",
+            "conda run -n term-project-wm python scripts/write_belief3d_showcase.py --output results/belief3d_showcase.md",
             "conda run -n term-project-wm python scripts/audit_belief3d_evidence.py --output-dir results/belief3d_audit",
             "```",
             "",
