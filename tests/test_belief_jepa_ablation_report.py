@@ -22,6 +22,7 @@ class BeliefJEPA3DAblationReportTest(unittest.TestCase):
                 "visual_invariance_weight": 0.1,
                 "geometry_teacher_weight": 0.2,
                 "geometry_prior_weight": 0.5,
+                "geometry_prior_log_std": -2.5,
                 "visual_geometry_weight": 0.0,
                 "target_encoder": "bidirectional_temporal_state6_occ",
                 "belief_head": "gaussian_mixture_3",
@@ -47,6 +48,7 @@ class BeliefJEPA3DAblationReportTest(unittest.TestCase):
                 "visual_invariance_weight": 0.1,
                 "geometry_teacher_weight": 0.2,
                 "geometry_prior_weight": 0.5,
+                "geometry_prior_log_std": -2.5,
                 "visual_geometry_weight": 0.0,
                 "target_encoder": "bidirectional_temporal_state6_occ",
                 "belief_head": "gaussian_mixture_3",
@@ -72,6 +74,7 @@ class BeliefJEPA3DAblationReportTest(unittest.TestCase):
                 "visual_invariance_weight": 0.1,
                 "geometry_teacher_weight": 0.2,
                 "geometry_prior_weight": 0.5,
+                "geometry_prior_log_std": -2.5,
                 "visual_geometry_weight": 0.0,
                 "target_encoder": "bidirectional_temporal_state6_occ",
                 "belief_head": "gaussian_mixture_3",
@@ -115,6 +118,7 @@ class BeliefJEPA3DAblationReportTest(unittest.TestCase):
         self.assertIn("visual inv", report)
         self.assertIn("geom teacher", report)
         self.assertIn("geom prior", report)
+        self.assertIn("prior log std", report)
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "ablation.csv"
             write_csv(path, rows)

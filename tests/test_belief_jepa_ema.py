@@ -200,6 +200,7 @@ class BeliefJEPAEMATest(unittest.TestCase):
             structured_dim=8,
             visual_geometry_weight=0.0,
             geometry_prior_weight=1.0,
+            geometry_prior_log_std=-2.5,
             world_min=-1.0,
             world_max=1.0,
         )
@@ -228,7 +229,10 @@ class BeliefJEPAEMATest(unittest.TestCase):
 
         self.assertIn("geometry_prior_mean", base)
         self.assertTrue(torch.allclose(base["mean"], visual["mean"]))
+        self.assertTrue(torch.allclose(base["log_std"], visual["log_std"]))
         self.assertTrue(torch.allclose(base["mixture_mean"], visual["mixture_mean"]))
+        self.assertTrue(torch.allclose(base["mixture_log_std"], visual["mixture_log_std"]))
+        self.assertLess(float(base["log_std"].mean()), -2.0)
         self.assertFalse(torch.allclose(base["mean"], physical["mean"]))
         self.assertFalse(torch.allclose(base["mixture_mean"], physical["mixture_mean"]))
 

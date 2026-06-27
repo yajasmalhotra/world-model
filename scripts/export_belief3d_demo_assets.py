@@ -152,6 +152,7 @@ def load_belief_jepa(config: Dict, device: torch.device, ckpt_path: str) -> tupl
         structured_dim=int(model_cfg.get("jepa_structured_dim", 64)),
         visual_geometry_weight=float(ckpt.get("visual_geometry_weight", model_cfg.get("jepa_visual_geometry_weight", 1.0))),
         geometry_prior_weight=float(ckpt.get("geometry_prior_weight", model_cfg.get("jepa_geometry_prior_weight", 0.0))),
+        geometry_prior_log_std=float(ckpt.get("geometry_prior_log_std", model_cfg.get("jepa_geometry_prior_log_std", -2.5))),
         world_min=float(data_cfg["world_min"]),
         world_max=float(data_cfg["world_max"]),
         velocity_limit=float(model_cfg["velocity_limit"]),

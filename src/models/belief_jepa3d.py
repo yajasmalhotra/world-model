@@ -32,6 +32,7 @@ class BeliefJEPA3D(nn.Module):
         structured_dim: int = 64,
         visual_geometry_weight: float = 1.0,
         geometry_prior_weight: float = 0.0,
+        geometry_prior_log_std: float = -2.5,
         world_min: float = -1.0,
         world_max: float = 1.0,
         velocity_limit: float = 0.16,
@@ -47,6 +48,7 @@ class BeliefJEPA3D(nn.Module):
         self.structured_dim = int(structured_dim)
         self.visual_geometry_weight = float(visual_geometry_weight)
         self.geometry_prior_weight = float(geometry_prior_weight)
+        self.geometry_prior_log_std = float(geometry_prior_log_std)
         self.world_min = float(world_min)
         self.world_max = float(world_max)
         self.velocity_limit = float(velocity_limit)
@@ -332,9 +334,11 @@ class BeliefJEPA3D(nn.Module):
     def _blend_geometry_prior(
         self,
         mean: torch.Tensor,
+        log_std: torch.Tensor,
         mixture_mean: torch.Tensor,
+        mixture_log_std: torch.Tensor,
         structured_context: dict[str, torch.Tensor] | None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
         prior = self._geometry_prior_state6(
             structured_context,
             batch_size=mean.shape[0],
@@ -342,11 +346,18 @@ class BeliefJEPA3D(nn.Module):
             dtype=mean.dtype,
         )
         if prior is None:
-            return mean, mixture_mean, None
+            return mean, log_std, mixture_mean, mixture_log_std, None
         weight = max(0.0, min(1.0, self.geometry_prior_weight))
+        prior_log_std = torch.full_like(
+            log_std,
+            self.geometry_prior_log_std,
+        ).clamp(self.min_log_std, self.max_log_std)
+        mixture_prior_log_std = prior_log_std.unsqueeze(-2).expand_as(mixture_log_std)
         blended_mean = (1.0 - weight) * mean + weight * prior
+        blended_log_std = (1.0 - weight) * log_std + weight * prior_log_std
         blended_mixture = (1.0 - weight) * mixture_mean + weight * prior.unsqueeze(-2)
-        return blended_mean, blended_mixture, prior
+        blended_mixture_log_std = (1.0 - weight) * mixture_log_std + weight * mixture_prior_log_std
+        return blended_mean, blended_log_std, blended_mixture, blended_mixture_log_std, prior
 
     def _encode_target(self, target_input: torch.Tensor, use_ema_target: bool) -> torch.Tensor:
         encoder, temporal, temporal_proj = self._ema_target_modules() if use_ema_target else self._online_target_modules()
@@ -395,7 +406,13 @@ class BeliefJEPA3D(nn.Module):
         mixture_logits = mixture_raw[..., 0]
         mixture_mean = self._bound_state6(mixture_raw[..., 1:7])
         mixture_log_std = mixture_raw[..., 7:13].clamp(self.min_log_std, self.max_log_std)
-        mean, mixture_mean, geometry_prior = self._blend_geometry_prior(mean, mixture_mean, structured_context)
+        mean, log_std, mixture_mean, mixture_log_std, geometry_prior = self._blend_geometry_prior(
+            mean,
+            log_std,
+            mixture_mean,
+            mixture_log_std,
+            structured_context,
+        )
 
         out = {
             "mean": mean,

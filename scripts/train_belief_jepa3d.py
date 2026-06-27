@@ -125,6 +125,7 @@ def build_model(config: Dict, device: torch.device, rgbd: bool) -> BeliefJEPA3D:
         structured_dim=int(model_cfg.get("jepa_structured_dim", 64)),
         visual_geometry_weight=float(model_cfg.get("jepa_visual_geometry_weight", 1.0)),
         geometry_prior_weight=float(model_cfg.get("jepa_geometry_prior_weight", 0.0)),
+        geometry_prior_log_std=float(model_cfg.get("jepa_geometry_prior_log_std", -2.5)),
         world_min=float(data_cfg["world_min"]),
         world_max=float(data_cfg["world_max"]),
         velocity_limit=float(model_cfg["velocity_limit"]),
@@ -413,6 +414,7 @@ def main() -> None:
             "mixture_components": float(model.mixture_components),
             "structured_context": float(model.use_structured_context),
             "geometry_prior_weight": float(model.geometry_prior_weight),
+            "geometry_prior_log_std": float(model.geometry_prior_log_std),
             "global_step": float(global_step),
             "train_loss": train_metrics.get("total", math.nan),
             **train_metrics,
@@ -446,6 +448,7 @@ def main() -> None:
                     "structured_context": bool(model.use_structured_context),
                     "visual_geometry_weight": float(model.visual_geometry_weight),
                     "geometry_prior_weight": float(model.geometry_prior_weight),
+                    "geometry_prior_log_std": float(model.geometry_prior_log_std),
                     "context_encoder": context_encoder_name(bool(args.rgbd), bool(model.use_structured_context)),
                 },
             )
@@ -474,6 +477,7 @@ def main() -> None:
             "structured_context": bool(model.use_structured_context),
             "visual_geometry_weight": float(model.visual_geometry_weight),
             "geometry_prior_weight": float(model.geometry_prior_weight),
+            "geometry_prior_log_std": float(model.geometry_prior_log_std),
             "context_encoder": context_encoder_name(bool(args.rgbd), bool(model.use_structured_context)),
         },
     )
